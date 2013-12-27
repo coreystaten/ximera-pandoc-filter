@@ -3,6 +3,7 @@
 
 import Prelude hiding (catch)
 
+import Control.Monad
 import Text.Pandoc
 import Text.Pandoc.Walk
 import System.Exit (ExitCode(..))
@@ -15,11 +16,12 @@ import Data.Aeson
 import Data.Hashable
 import qualified Data.Map as Map
 import qualified Data.Text as T
-import qualified Data.ByteString.Lazy as B
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Lazy as BL
 import Database.MongoDB hiding (lookup, replace, runCommand)
 
 environments :: [T.Text]
-environments = ["question", "exercise", "exploration"]
+environments = ["question", "exercise", "exploration", "answer", "solution"]
 
 -- | The template to use for tikzpictures from the filter, loaded from tikz-template.tex
 tikzTemplate :: IO Template
@@ -38,6 +40,8 @@ compileTikzFile :: FilePath -- ^ The filename to compile.
                 -> IO ()
 compileTikzFile toCompile target =
     do
+        -- TODO: mupdf instead of convert?
+        -- TODO: Don't forget about security of running other people's pdflatex.  Either sandboxed version, or run this filter with low permissions.
         pHandle <- runCommand $ T.unpack (T.concat ["pdflatex -output-directory=", T.pack $ dropFileName toCompile, " ", T.pack toCompile,  " > /dev/null && convert -density 600x600 ", toCompilePdf, " -quality 90 -resize 800x600 ", T.pack target, " > /dev/null"])
         exitCode <- waitForProcess pHandle
         removeFile $ T.unpack toCompilePdf
@@ -48,10 +52,9 @@ compileTikzFile toCompile target =
     where toCompilePdf = T.replace ".tex" ".pdf" (T.pack toCompile)
 
 
--- | Given content of tikzpicture environment, compile to PNG and return the filename.
--- Note that the caller should delete the file when finished with it.
+-- | Given content of tikzpicture environment, compile to PNG and return the contents.
 tikzpictureToPng :: T.Text      -- ^ The contents of the tikzpicture environment.
-                 -> IO FilePath -- ^ The name of the resulting PNG file.
+                 -> IO B.ByteString -- ^ The content of the resulting PNG file.
 tikzpictureToPng content =
     do
         -- Render through Pandoc template.
@@ -67,14 +70,17 @@ tikzpictureToPng content =
         let pngFileName = T.unpack $ T.replace ".tex" ".png" (T.pack fileName)
         compileTikzFile fileName pngFileName
 
-        --  Remove temporary files.  Note we leave the PNG file for the Node process to clean up.
+        pngContent <- B.readFile pngFileName
+
+        --  Remove temporary files.
         let logFileName = T.unpack $ T.replace ".tex" ".log" (T.pack fileName)
             auxFileName = T.unpack $ T.replace ".tex" ".aux" (T.pack fileName)
         removeFile fileName
         removeFile logFileName
         removeFile auxFileName
+        removeFile pngFileName
 
-        return pngFileName
+        return pngContent
 
 tikzFilter :: T.Text -> Block -> IO Block
 tikzFilter repoId b@(RawBlock (Format "latex") s) =
@@ -85,24 +91,21 @@ tikzFilter repoId b@(RawBlock (Format "latex") s) =
             if T.isPrefixOf ("\\begin{tikzpicture}") sT
             then
                 do
-                    pngFileName <- tikzpictureToPng sT
+                    pngContent <- tikzpictureToPng sT
 
                     -- Hash PNG Contents, and use as id for image in new block returned.
-                    pngContents <- B.readFile pngFileName
-                    let h = abs $ hash pngContents
+                    let h = abs $ hash pngContent
 
-                    -- Write names of PNG files with identifiers to MongoDB; node process will then store in GridFS.
-                    -- The Haskell MongoDB driver doesn't support GridFS, else this would just be a one step process.
-                    addPngFileNameToMongo pngFileName h repoId
+                    -- Add file contents to MongoDB
+                    addPngFileToMongo pngContent h repoId
                     
                     return $ Plain [Image [] ("/tikzpictures/" ++ (show h), "Tikz Picture")]
             else
                 return b
 tikzFilter _ b = return b
 
--- TODO: Move Mongo host/credentials to environment variables.
-addPngFileNameToMongo :: FilePath -> Int -> T.Text -> IO ()
-addPngFileNameToMongo fileName h repoId =
+addPngFileToMongo :: B.ByteString -> Int -> T.Text -> IO ()
+addPngFileToMongo content h repoId =
     do
         mongoHost <- getEnv "XIMERA_MONGO_URL"
         mongoDatabase <- getEnv "XIMERA_MONGO_DATABASE"
@@ -113,29 +116,42 @@ addPngFileNameToMongo fileName h repoId =
             Right _ -> close pipe
     where
         run = do
-            insert_ "TikzPngFilesToLoad" ["filename" =: fileName, "hash" =: h, "repoId" =: repoId]
+            insert_ "TikzPngFilesToLoad" ["content" =: Binary content, "hash" =: h, "repoId" =: repoId]
 
 -- | Turn latex RawBlocks for the given environment into Divs with that environment as their class.
 -- Normally, these blocks are ignored by HTML writer. -}
-environmentFilter :: T.Text -> Block -> Block
-environmentFilter e b@(RawBlock (Format "latex") s) =
+environmentFilter :: T.Text -> Map.Map String MetaValue -> Block -> IO Block
+environmentFilter e meta b@(RawBlock (Format "latex") s) =
 	let
-		sLen = length s
-		eLen = T.length e
-	in 
+        sLen = length s
+    	eLen = T.length e
+    in
 		if T.isPrefixOf (T.concat ["\\begin{", e, "}"]) (T.pack s)
-			then Div ("",[T.unpack e],[]) [Plain [Str $ drop (eLen + 8) $ take (sLen - (eLen + 6)) s]]
-			else b
-environmentFilter _ b = b
+		then
+            let
+                content = drop (eLen + 8) $ take (sLen - (eLen + 6)) s
+            in
+                do
+                    blocks <- parseRawBlock content meta
+                    return $ Div ("",[T.unpack e],[]) blocks
+		else return b
+environmentFilter _ _ b = return b
 
-environmentFilters :: [Block -> Block]
+parseRawBlock :: String -> Map.Map String MetaValue -> IO [Block]
+parseRawBlock content meta =
+    let
+        (Pandoc _ blocks) = readLaTeX (def {readerParseRaw = True}) content
+    in
+        sequence $ map (substituteRawBlocks meta) blocks
+
+environmentFilters :: [Map.Map String MetaValue -> Block -> IO Block]
 environmentFilters = map environmentFilter environments
 
 substituteRawBlocks :: (Map.Map String MetaValue) -> Block -> IO Block
 substituteRawBlocks m x =
     do
         let repoId = findRepoId m
-        let y = foldl (flip ($)) x environmentFilters
+        y <- foldM (flip ($)) x (map ($ m) environmentFilters)
         tikzFilter repoId y
 
 findRepoId :: Map.Map String MetaValue -> T.Text
@@ -149,16 +165,15 @@ findRepoId m =
 
 main :: IO ()
 main = do
-    --let repoId = findRepoId $ either error id . eitherDecode'
     toJSONFilterMeta substituteRawBlocks
 
 -- Modified version of toJSONFilter, also passing metadata.
 toJSONFilterMeta :: (Map.Map String MetaValue -> Block -> IO Block) -> IO ()
 toJSONFilterMeta f =
     do
-        jsonContents <- B.getContents
+        jsonContents <- BL.getContents
         let doc = either error id . eitherDecode' $ jsonContents
         let meta = case doc of
                        Pandoc m _ -> unMeta m
         processedDoc <- (walkM (f meta) :: Pandoc -> IO Pandoc) $ doc
-        B.putStr . encode $ processedDoc
+        BL.putStr . encode $ processedDoc
