@@ -20,6 +20,10 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import Database.MongoDB hiding (lookup, replace, runCommand)
 
+-- Replace these with environments so they're parsed correctly to divs?
+commands :: [T.Text]
+commands = ["headline", "activitytitle"]
+
 environments :: [T.Text]
 environments = ["question", "exercise", "exploration", "answer", "solution"]
 
@@ -42,6 +46,9 @@ compileTikzFile toCompile target =
     do
         -- TODO: mupdf instead of convert?
         -- TODO: Don't forget about security of running other people's pdflatex.  Either sandboxed version, or run this filter with low permissions.
+        --       Security plan:  Run the pandoc/filter process using a Linux container or other sandbox; do not acces MongoDB from the filter, but instead move that to Node
+        --                       service (since sandbox should disable network access); disable first line configuration of LaTeX files (so user can not enable \write18);
+        --                       make sure repos are extracted to distinct directories so that sandboxing does not share repo content.
         pHandle <- runCommand $ T.unpack (T.concat ["pdflatex -output-directory=", T.pack $ dropFileName toCompile, " ", T.pack toCompile,  " > /dev/null && convert -density 600x600 ", toCompilePdf, " -quality 90 -resize 800x600 ", T.pack target, " > /dev/null"])
         exitCode <- waitForProcess pHandle
         removeFile $ T.unpack toCompilePdf
@@ -145,7 +152,7 @@ parseRawBlock content meta =
         sequence $ map (substituteRawBlocks meta) blocks
 
 environmentFilters :: [Map.Map String MetaValue -> Block -> IO Block]
-environmentFilters = map environmentFilter environments
+environmentFilters = map environmentFilter (environments ++ commands)
 
 substituteRawBlocks :: (Map.Map String MetaValue) -> Block -> IO Block
 substituteRawBlocks m x =
