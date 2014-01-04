@@ -19,13 +19,23 @@ import qualified Data.Text as T
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import Database.MongoDB hiding (lookup, replace, runCommand)
+import Data.UUID (toString)
+import Data.UUID.V4 (nextRandom)
 
--- Replace these with environments so they're parsed correctly to divs?
-commands :: [T.Text]
-commands = ["headline", "activitytitle"]
+data EnvironmentType = EnvDiv | EnvSpan
+
+environtmentMappings :: Map.Map T.Text (EnvironmentType, [String], [(String,String)]) -- Type, classes, attributes
+environtmentMappings = Map.fromList [
+    ("question", (EnvDiv, ["question"], [("ximera-question", "")])),
+    ("exercise", (EnvDiv, ["exercise"], [("ximera-exercise", "")])),
+    ("exploration", (EnvDiv, ["exploration"], [("ximera-exploration", "")])),
+    ("answer", (EnvDiv, ["answer"], [("ximera-answer", "")])),
+    ("solution", (EnvDiv, ["solution"], [("ximera-solution", "")])),
+    ("headline", (EnvDiv, ["headline"], [("ximera-headline", "")])),
+    ("activitytitle", (EnvDiv, ["activitytitle"], [("ximera-activitytitle", "")]))]
 
 environments :: [T.Text]
-environments = ["question", "exercise", "exploration", "answer", "solution"]
+environments = Map.keys environtmentMappings
 
 -- | The template to use for tikzpictures from the filter, loaded from tikz-template.tex
 tikzTemplate :: IO Template
@@ -137,10 +147,18 @@ environmentFilter e meta b@(RawBlock (Format "latex") s) =
 		then
             let
                 content = drop (eLen + 8) $ take (sLen - (eLen + 6)) s
+                (envType, classes, attributes) = case Map.lookup e environtmentMappings of
+                    Just x -> x
+                    Nothing -> error "This shouldn't happen: couldn't find environment in environmentMappings."
             in
-                do
-                    blocks <- parseRawBlock content meta
-                    return $ Div ("",[T.unpack e],[]) blocks
+                case envType of
+                    EnvDiv -> do
+                        blocks <- parseRawBlock content meta
+                        randId <- nextRandom
+                        return $ Div ("",classes,[("data-uuid", toString randId)] ++ attributes) blocks
+                    EnvSpan -> do
+                        randId <- nextRandom
+                        return $ Plain [Span ("",classes,[("data-uuid", toString randId)] ++ attributes) [Str content]]
 		else return b
 environmentFilter _ _ b = return b
 
@@ -152,7 +170,7 @@ parseRawBlock content meta =
         sequence $ map (substituteRawBlocks meta) blocks
 
 environmentFilters :: [Map.Map String MetaValue -> Block -> IO Block]
-environmentFilters = map environmentFilter (environments ++ commands)
+environmentFilters = map environmentFilter environments
 
 substituteRawBlocks :: (Map.Map String MetaValue) -> Block -> IO Block
 substituteRawBlocks m x =
@@ -183,4 +201,5 @@ toJSONFilterMeta f =
         let meta = case doc of
                        Pandoc m _ -> unMeta m
         processedDoc <- (walkM (f meta) :: Pandoc -> IO Pandoc) $ doc
+        -- TODO: Put some metadata blocks at the beginning with repoId, activity hash.  Pass activity hash from activity service.
         BL.putStr . encode $ processedDoc
