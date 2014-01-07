@@ -22,17 +22,18 @@ import Database.MongoDB hiding (lookup, replace, runCommand)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
 
-data EnvironmentType = EnvDiv | EnvSpan
+data EnvironmentType = EnvDiv | EnvSpan | AnswerDiv
 
 environtmentMappings :: Map.Map T.Text (EnvironmentType, [String], [(String,String)]) -- Type, classes, attributes
 environtmentMappings = Map.fromList [
-    ("question", (EnvDiv, ["question"], [("ximera-question", "")])),
-    ("exercise", (EnvDiv, ["exercise"], [("ximera-exercise", "")])),
-    ("exploration", (EnvDiv, ["exploration"], [("ximera-exploration", "")])),
-    ("answer", (EnvDiv, ["answer"], [("ximera-answer", "")])),
+    ("shuffle", (EnvDiv, ["shuffle"], [("ximera-shuffle", "")])),
+    ("question", (EnvDiv, ["question"], [("ximera-question", ""), ("shuffleStatus", "shuffleStatus")])),
+    ("exercise", (EnvDiv, ["exercise"], [("ximera-exercise", ""), ("shuffleStatus", "shuffleStatus")])),
+    ("exploration", (EnvDiv, ["exploration"], [("ximera-exploration", ""), ("shuffleStatus", "shuffleStatus")])),
     ("solution", (EnvDiv, ["solution"], [("ximera-solution", "")])),
     ("headline", (EnvDiv, ["headline"], [("ximera-headline", "")])),
-    ("activitytitle", (EnvDiv, ["activitytitle"], [("ximera-activitytitle", "")]))]
+    ("activitytitle", (EnvDiv, ["activitytitle"], [("ximera-activitytitle", "")])),
+    ("answer", (AnswerDiv, ["answer"], [("ximera-answer", "ximera-answer")]))]
 
 environments :: [T.Text]
 environments = Map.keys environtmentMappings
@@ -159,6 +160,9 @@ environmentFilter e meta b@(RawBlock (Format "latex") s) =
                     EnvSpan -> do
                         randId <- nextRandom
                         return $ Plain [Span ("",classes,[("data-uuid", toString randId)] ++ attributes) [Str content]]
+                    AnswerDiv -> do
+                        randId <- nextRandom
+                        return $ Div ("",classes,[("data-uuid", toString randId), ("data-answer", content)] ++ attributes) []
 		else return b
 environmentFilter _ _ b = return b
 
