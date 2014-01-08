@@ -10,7 +10,7 @@ import System.Exit (ExitCode(..))
 import System.IO
 import System.Environment
 import System.Directory (getTemporaryDirectory, removeFile)
-import System.FilePath.Posix (dropFileName)
+import System.FilePath.Posix (dropFileName, (</>))
 import System.Process (runCommand, waitForProcess)
 import Data.Aeson
 import Data.Hashable
@@ -49,7 +49,9 @@ inlineEnvironments = ["choice", "answer", "activitytitle", "headline"]
 tikzTemplate :: IO Template
 tikzTemplate =
     do
-        templateContents <- readFile "tikz-template.tex"
+        filterPath <- getEnv "XIMERA_FILTER_PATH"
+        let templatePath = (dropFileName filterPath) </> "tikz-template.tex"
+        templateContents <- readFile templatePath
         let result =  case (compileTemplate $ T.pack templateContents) of
                           Left _ -> error "Unable to parse tikz-template.tex"
                           Right template -> template
@@ -97,14 +99,6 @@ tikzpictureToPng content =
 
         pngContent <- B.readFile pngFileName
 
-        --  Remove temporary files.
-        let logFileName = T.unpack $ T.replace ".tex" ".log" (T.pack fileName)
-            auxFileName = T.unpack $ T.replace ".tex" ".aux" (T.pack fileName)
-        removeFile fileName
-        removeFile logFileName
-        removeFile auxFileName
-        removeFile pngFileName
-
         return pngContent
 
 tikzFilter :: T.Text -> Block -> IO Block
@@ -141,7 +135,7 @@ addPngFileToMongo content h repoId =
             Right _ -> close pipe
     where
         run = do
-            insert_ "TikzPngFilesToLoad" ["content" =: Binary content, "hash" =: h, "repoId" =: repoId]
+            insert_ "tikzPngFiles" ["content" =: Binary content, "hash" =: h, "repoId" =: repoId]
 
 -- | Turn latex RawBlocks for the given environment into Divs with that environment as their class.
 -- Normally, these blocks are ignored by HTML writer. -}
