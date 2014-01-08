@@ -21,8 +21,9 @@ import qualified Data.ByteString.Lazy as BL
 import Database.MongoDB hiding (lookup, replace, runCommand)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
+import Text.Regex.PCRE
 
-data EnvironmentType = EnvDiv | EnvSpan | AnswerDiv
+data EnvironmentType = EnvDiv | EnvSpan | AnswerDiv | ChoiceDiv | MultipleChoiceDiv
 
 environtmentMappings :: Map.Map T.Text (EnvironmentType, [String], [(String,String)]) -- Type, classes, attributes
 environtmentMappings = Map.fromList [
@@ -33,10 +34,16 @@ environtmentMappings = Map.fromList [
     ("solution", (EnvDiv, ["solution"], [("ximera-solution", "")])),
     ("headline", (EnvDiv, ["headline"], [("ximera-headline", "")])),
     ("activitytitle", (EnvDiv, ["activitytitle"], [("ximera-activitytitle", "")])),
-    ("answer", (AnswerDiv, ["answer"], [("ximera-answer", "ximera-answer")]))]
+    ("answer", (AnswerDiv, ["answer"], [("ximera-answer", "")])),
+    ("choice", (ChoiceDiv, ["choice"], [("ximera-choice", "")])),
+    ("multiple-choice", (MultipleChoiceDiv, ["multiple-choice"], [("ximera-multiple-choice", "")]))]
 
 environments :: [T.Text]
 environments = Map.keys environtmentMappings
+
+-- List of environments coming from inline commands; require parsing of arguments.
+inlineEnvironments :: [T.Text]
+inlineEnvironments = ["choice", "answer", "activitytitle", "headline"]
 
 -- | The template to use for tikzpictures from the filter, loaded from tikz-template.tex
 tikzTemplate :: IO Template
@@ -147,24 +154,52 @@ environmentFilter e meta b@(RawBlock (Format "latex") s) =
 		if T.isPrefixOf (T.concat ["\\begin{", e, "}"]) (T.pack s)
 		then
             let
-                content = drop (eLen + 8) $ take (sLen - (eLen + 6)) s
-                (envType, classes, attributes) = case Map.lookup e environtmentMappings of
+                rawContent = drop (eLen + 8) $ take (sLen - (eLen + 6)) s
+                isInline = elem e inlineEnvironments
+                contentChunks = 
+                    case isInline of
+                        True -> parseContentChunks rawContent
+                        False -> [rawContent]
+                content = head contentChunks
+                (envType, baseClasses, baseAttributes) = case Map.lookup e environtmentMappings of
                     Just x -> x
                     Nothing -> error "This shouldn't happen: couldn't find environment in environmentMappings."
             in
-                case envType of
-                    EnvDiv -> do
-                        blocks <- parseRawBlock content meta
-                        randId <- nextRandom
-                        return $ Div ("",classes,[("data-uuid", toString randId)] ++ attributes) blocks
-                    EnvSpan -> do
-                        randId <- nextRandom
-                        return $ Plain [Span ("",classes,[("data-uuid", toString randId)] ++ attributes) [Str content]]
-                    AnswerDiv -> do
-                        randId <- nextRandom
-                        return $ Div ("",classes,[("data-uuid", toString randId), ("data-answer", content)] ++ attributes) []
+                do
+                    randId <- nextRandom
+                    let attributes = [("data-uuid", toString randId)] ++ baseAttributes
+                    let classes = baseClasses
+                    result <- 
+                        case envType of
+                            EnvDiv -> do
+                                blocks <- parseRawBlock content meta
+                                return $ Div ("", classes, attributes) blocks
+                            EnvSpan -> do
+                                return $ Plain [Span ("", classes, attributes) [Str content]]
+                            AnswerDiv -> do
+                                return $ Div ("", classes, attributes ++ [("data-answer", content)]) []
+                            MultipleChoiceDiv -> do
+                                blocks <- parseRawBlock content meta
+                                return $ Div ("", classes, attributes ++ [("data-answer", "correct")]) blocks
+                            ChoiceDiv -> do
+                                -- TODO: Put correct/incorrect into this div from second argument.
+                                let value =
+                                        case contentChunks of
+                                            _:v:_ -> v
+                                            _ -> ""
+                                return $ Div ("",classes, attributes ++ [("data-value",value)]) [Plain [Str content]]
+                    return result
 		else return b
 environmentFilter _ _ b = return b
+
+pat :: String -> String -> [[String]]
+pat pattern str = str =~ pattern
+
+-- Example: "{asdf}{qwer}" -> ["asdf", "qwer"]
+parseContentChunks :: String -> [String]
+parseContentChunks content = map (!! 1) ((pat "{([^}]*)}" content))
+
+
 
 parseRawBlock :: String -> Map.Map String MetaValue -> IO [Block]
 parseRawBlock content meta =
