@@ -1,5 +1,5 @@
 
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, ViewPatterns #-}
 
 import Prelude hiding (catch)
 
@@ -10,7 +10,7 @@ import System.Exit (ExitCode(..))
 import System.IO
 import System.Environment
 import System.Directory (getTemporaryDirectory, removeFile)
-import System.FilePath.Posix (dropFileName)
+import System.FilePath.Posix (dropFileName, (</>))
 import System.Process (runCommand, waitForProcess)
 import Data.Aeson
 import Data.Hashable
@@ -21,8 +21,9 @@ import qualified Data.ByteString.Lazy as BL
 import Database.MongoDB hiding (lookup, replace, runCommand)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
+import Text.Regex.PCRE
 
-data EnvironmentType = EnvDiv | EnvSpan | AnswerDiv
+data EnvironmentType = EnvDiv | EnvSpan | AnswerDiv | ChoiceDiv | MultipleChoiceDiv
 
 environtmentMappings :: Map.Map T.Text (EnvironmentType, [String], [(String,String)]) -- Type, classes, attributes
 environtmentMappings = Map.fromList [
@@ -35,15 +36,23 @@ environtmentMappings = Map.fromList [
     ("activitytitle", (EnvDiv, ["activitytitle"], [("ximera-activitytitle", "")])),
     ("youtube", (EnvDiv, ["youtube"], [("ximera-youtube", "")])),
     ("answer", (AnswerDiv, ["answer"], [("ximera-answer", "ximera-answer")]))]
+    ("choice", (ChoiceDiv, ["choice"], [("ximera-choice", "")])),
+    ("multiple-choice", (MultipleChoiceDiv, ["multiple-choice"], [("ximera-multiple-choice", "")]))]
 
 environments :: [T.Text]
 environments = Map.keys environtmentMappings
+
+-- List of environments coming from inline commands; require parsing of arguments.
+inlineEnvironments :: [T.Text]
+inlineEnvironments = ["choice", "answer", "activitytitle", "headline"]
 
 -- | The template to use for tikzpictures from the filter, loaded from tikz-template.tex
 tikzTemplate :: IO Template
 tikzTemplate =
     do
-        templateContents <- readFile "tikz-template.tex"
+        filterPath <- getEnv "XIMERA_FILTER_PATH"
+        let templatePath = (dropFileName filterPath) </> "tikz-template.tex"
+        templateContents <- readFile templatePath
         let result =  case (compileTemplate $ T.pack templateContents) of
                           Left _ -> error "Unable to parse tikz-template.tex"
                           Right template -> template
@@ -91,14 +100,6 @@ tikzpictureToPng content =
 
         pngContent <- B.readFile pngFileName
 
-        --  Remove temporary files.
-        let logFileName = T.unpack $ T.replace ".tex" ".log" (T.pack fileName)
-            auxFileName = T.unpack $ T.replace ".tex" ".aux" (T.pack fileName)
-        removeFile fileName
-        removeFile logFileName
-        removeFile auxFileName
-        removeFile pngFileName
-
         return pngContent
 
 tikzFilter :: T.Text -> Block -> IO Block
@@ -135,7 +136,7 @@ addPngFileToMongo content h repoId =
             Right _ -> close pipe
     where
         run = do
-            insert_ "TikzPngFilesToLoad" ["content" =: Binary content, "hash" =: h, "repoId" =: repoId]
+            insert_ "tikzPngFiles" ["content" =: Binary content, "hash" =: h, "repoId" =: repoId]
 
 -- | Turn latex RawBlocks for the given environment into Divs with that environment as their class.
 -- Normally, these blocks are ignored by HTML writer. -}
@@ -148,24 +149,68 @@ environmentFilter e meta b@(RawBlock (Format "latex") s) =
 		if T.isPrefixOf (T.concat ["\\begin{", e, "}"]) (T.pack s)
 		then
             let
-                content = drop (eLen + 8) $ take (sLen - (eLen + 6)) s
-                (envType, classes, attributes) = case Map.lookup e environtmentMappings of
+                rawContent = drop (eLen + 8) $ take (sLen - (eLen + 6)) s
+                isInline = elem e inlineEnvironments
+                optionalParameters = parseOptionalParameters rawContent
+                requiredParameters = 
+                    case isInline of
+                        True -> parseInlineRequiredParameters rawContent
+                        False -> [rawContent]
+                -- Convenience variable for environments not using required parameters.
+                content = head contentChunks
+                (envType, baseClasses, baseAttributes) = case Map.lookup e environtmentMappings of
                     Just x -> x
                     Nothing -> error "This shouldn't happen: couldn't find environment in environmentMappings."
             in
-                case envType of
-                    EnvDiv -> do
-                        blocks <- parseRawBlock content meta
-                        randId <- nextRandom
-                        return $ Div ("",classes,[("data-uuid", toString randId)] ++ attributes) blocks
-                    EnvSpan -> do
-                        randId <- nextRandom
-                        return $ Plain [Span ("",classes,[("data-uuid", toString randId)] ++ attributes) [Str content]]
-                    AnswerDiv -> do
-                        randId <- nextRandom
-                        return $ Div ("",classes,[("data-uuid", toString randId), ("data-answer", content)] ++ attributes) []
+                do
+                    randId <- nextRandom
+                    let attributes = [("data-uuid", toString randId)] ++ baseAttributes
+                    let classes = baseClasses
+                    result <- 
+                        case envType of
+                            EnvDiv -> do
+                                blocks <- parseRawBlock content meta
+                                return $ Div ("", classes, attributes) blocks
+                            EnvSpan -> do
+                                return $ Plain [Span ("", classes, attributes) [Str content]]
+                            AnswerDiv -> do
+                                return $ Div ("", classes, attributes ++ [("data-answer", content)]) []
+                            MultipleChoiceDiv -> do
+                                blocks <- parseRawBlock content meta
+                                return $ Div ("", classes, attributes ++ [("data-answer", "correct")]) blocks
+                            ChoiceDiv -> do
+                                -- TODO: Put correct/incorrect into this div from second argument.
+                                let value =
+                                        case contentChunks of
+                                            _:v:_ -> v
+                                            _ -> ""
+                                return $ Div ("",classes, attributes ++ [("data-value",value)]) [Plain [Str content]]
+                    return result
 		else return b
 environmentFilter _ _ b = return b
+
+-- Helper methods; type checking doesn't want to work without this...
+-- Gives list of [match, matchGroup1, matchGroup2, ...]
+pat :: String -> String -> [[String]]
+pat pattern str = str =~ pattern
+
+--Gives tuple of (beforeMatch, match, afterMatch)
+patTuple :: String -> (String, String, String)
+patTuple pattern str = str =~ pattern
+
+-- Example: "{asdf}{qwer}" -> ["asdf", "qwer"]
+
+
+parseInlineRequiredParameters :: String -> [String]
+parseInlineRequiredParameters content = map (!! 1) ((pat "{([^}]*)}" content))
+
+optionalParameterPattern = "^\\[([^\\]])\\]*"
+
+parseOptionalParameters :: String -> [String]
+parseOptionalParameters content = map (!! 1) ((pat optionalParameterPattern content))
+
+removeOptionalParameters :: String -> String
+removeOptionalParameters (pat optionalParameterPattern content -> (_, _, remainder)) = remainder
 
 parseRawBlock :: String -> Map.Map String MetaValue -> IO [Block]
 parseRawBlock content meta =
