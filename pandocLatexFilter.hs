@@ -33,6 +33,7 @@ environtmentMappings = Map.fromList [
     ("solution", (EnvDiv, ["solution"], [("ximera-solution", "")])),
     ("headline", (EnvDiv, ["headline"], [("ximera-headline", "")])),
     ("activitytitle", (EnvDiv, ["activitytitle"], [("ximera-activitytitle", "")])),
+    ("youtube", (EnvDiv, ["youtube"], [("ximera-youtube", "")])),
     ("answer", (AnswerDiv, ["answer"], [("ximera-answer", "ximera-answer")]))]
 
 environments :: [T.Text]
