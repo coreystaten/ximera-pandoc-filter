@@ -10,7 +10,7 @@ import System.Exit (ExitCode(..))
 import System.IO
 import System.Environment
 import System.Directory (getTemporaryDirectory, removeFile)
-import System.FilePath.Posix (dropFileName)
+import System.FilePath.Posix (dropFileName, (</>))
 import System.Process (runCommand, waitForProcess)
 import Data.Aeson
 import Data.Hashable
@@ -23,7 +23,7 @@ import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
 import Text.Regex.PCRE
 
-data EnvironmentType = EnvDiv | EnvSpan | AnswerDiv | ChoiceDiv
+data EnvironmentType = EnvDiv | EnvSpan | AnswerDiv | ChoiceDiv | MultipleChoiceDiv
 
 environtmentMappings :: Map.Map T.Text (EnvironmentType, [String], [(String,String)]) -- Type, classes, attributes
 environtmentMappings = Map.fromList [
@@ -36,7 +36,7 @@ environtmentMappings = Map.fromList [
     ("activitytitle", (EnvDiv, ["activitytitle"], [("ximera-activitytitle", "")])),
     ("answer", (AnswerDiv, ["answer"], [("ximera-answer", "")])),
     ("choice", (ChoiceDiv, ["choice"], [("ximera-choice", "")])),
-    ("multiple-choice", (EnvDiv, ["multiple-choice"], [("ximera-multiple-choice", "")]))]
+    ("multiple-choice", (MultipleChoiceDiv, ["multiple-choice"], [("ximera-multiple-choice", "")]))]
 
 environments :: [T.Text]
 environments = Map.keys environtmentMappings
@@ -49,7 +49,9 @@ inlineEnvironments = ["choice", "answer", "activitytitle", "headline"]
 tikzTemplate :: IO Template
 tikzTemplate =
     do
-        templateContents <- readFile "tikz-template.tex"
+        filterPath <- getEnv "XIMERA_FILTER_PATH"
+        let templatePath = (dropFileName filterPath) </> "tikz-template.tex"
+        templateContents <- readFile templatePath
         let result =  case (compileTemplate $ T.pack templateContents) of
                           Left _ -> error "Unable to parse tikz-template.tex"
                           Right template -> template
@@ -97,14 +99,6 @@ tikzpictureToPng content =
 
         pngContent <- B.readFile pngFileName
 
-        --  Remove temporary files.
-        let logFileName = T.unpack $ T.replace ".tex" ".log" (T.pack fileName)
-            auxFileName = T.unpack $ T.replace ".tex" ".aux" (T.pack fileName)
-        removeFile fileName
-        removeFile logFileName
-        removeFile auxFileName
-        removeFile pngFileName
-
         return pngContent
 
 tikzFilter :: T.Text -> Block -> IO Block
@@ -141,7 +135,7 @@ addPngFileToMongo content h repoId =
             Right _ -> close pipe
     where
         run = do
-            insert_ "TikzPngFilesToLoad" ["content" =: Binary content, "hash" =: h, "repoId" =: repoId]
+            insert_ "tikzPngFiles" ["content" =: Binary content, "hash" =: h, "repoId" =: repoId]
 
 -- | Turn latex RawBlocks for the given environment into Divs with that environment as their class.
 -- Normally, these blocks are ignored by HTML writer. -}
@@ -180,17 +174,19 @@ environmentFilter e meta b@(RawBlock (Format "latex") s) =
                                 return $ Plain [Span ("", classes, attributes) [Str content]]
                             AnswerDiv -> do
                                 return $ Div ("", classes, attributes ++ [("data-answer", content)]) []
+                            MultipleChoiceDiv -> do
+                                blocks <- parseRawBlock content meta
+                                return $ Div ("", classes, attributes ++ [("data-answer", "correct")]) blocks
                             ChoiceDiv -> do
                                 -- TODO: Put correct/incorrect into this div from second argument.
                                 let value =
                                         case contentChunks of
                                             _:v:_ -> v
                                             _ -> ""
-                                return $ Div ("",classes, attributes ++ [("data-value",value)]) []
+                                return $ Div ("",classes, attributes ++ [("data-value",value)]) [Plain [Str content]]
                     return result
 		else return b
 environmentFilter _ _ b = return b
-
 
 -- Helper methods; type checking doesn't want to work without this...
 -- Gives list of [match, matchGroup1, matchGroup2, ...]
