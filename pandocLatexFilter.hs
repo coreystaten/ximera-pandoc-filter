@@ -34,6 +34,8 @@ environtmentMappings = Map.fromList [
     ("solution", (EnvDiv, ["solution"], [("ximera-solution", "")])),
     ("abstract", (DescriptionMeta, ["description"], [("ximera-description", "")])),
     ("answer", (AnswerSpan, ["answer"], [("ximera-answer", "")])),
+    ("youtube", (EnvDiv, ["youtube"], [("ximera-youtube", "")])),
+    ("answer", (AnswerDiv, ["answer"], [("ximera-answer", "ximera-answer")])),
     ("choice", (ChoiceDiv, ["choice"], [("ximera-choice", "")])),
     ("multiple-choice", (MultipleChoiceDiv, ["multiple-choice"], [("ximera-multiple-choice", "")]))]
 
