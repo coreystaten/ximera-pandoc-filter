@@ -23,7 +23,7 @@ import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
 import Text.Regex.PCRE
 
-data EnvironmentType = EnvDiv | EnvSpan | AnswerDiv | ChoiceDiv | MultipleChoiceDiv
+data EnvironmentType = EnvDiv | EnvSpan | AnswerSpan | ChoiceDiv | MultipleChoiceDiv | DescriptionMeta
 
 environtmentMappings :: Map.Map T.Text (EnvironmentType, [String], [(String,String)]) -- Type, classes, attributes
 environtmentMappings = Map.fromList [
@@ -32,9 +32,8 @@ environtmentMappings = Map.fromList [
     ("exercise", (EnvDiv, ["exercise"], [("ximera-exercise", ""), ("shuffleStatus", "shuffleStatus")])),
     ("exploration", (EnvDiv, ["exploration"], [("ximera-exploration", ""), ("shuffleStatus", "shuffleStatus")])),
     ("solution", (EnvDiv, ["solution"], [("ximera-solution", "")])),
-    ("headline", (EnvDiv, ["headline"], [("ximera-headline", "")])),
-    ("activitytitle", (EnvDiv, ["activitytitle"], [("ximera-activitytitle", "")])),
-    ("answer", (AnswerDiv, ["answer"], [("ximera-answer", "")])),
+    ("abstract", (DescriptionMeta, ["description"], [("ximera-description", "")])),
+    ("answer", (AnswerSpan, ["answer"], [("ximera-answer", "")])),
     ("choice", (ChoiceDiv, ["choice"], [("ximera-choice", "")])),
     ("multiple-choice", (MultipleChoiceDiv, ["multiple-choice"], [("ximera-multiple-choice", "")]))]
 
@@ -123,8 +122,8 @@ tikzFilter repoId b@(RawBlock (Format "latex") s) =
                 return b
 tikzFilter _ b = return b
 
-addPngFileToMongo :: B.ByteString -> Int -> T.Text -> IO ()
-addPngFileToMongo content h repoId =
+runMongo :: MonadIO m => Action m a -> IO ()
+runMongo run =
     do
         mongoHost <- getEnv "XIMERA_MONGO_URL"
         mongoDatabase <- getEnv "XIMERA_MONGO_DATABASE"
@@ -132,10 +131,32 @@ addPngFileToMongo content h repoId =
         err <- access pipe master (T.pack mongoDatabase) run
         case err of
             Left _ -> error (show err)
-            Right _ -> close pipe
+            Right _ -> close pipe    
+
+
+addPngFileToMongo :: B.ByteString -> Int -> T.Text -> IO ()
+addPngFileToMongo content h repoId =
+    runMongo $ insert_ "tikzPngFiles" ["content" =: Binary content, "hash" =: h, "repoId" =: repoId]
+
+writeDescriptionToMongo :: Map.Map String String -> String -> IO ()
+writeDescriptionToMongo meta description =
+    runMongo $ repsert selectSt ["description" =: description]
     where
-        run = do
-            insert_ "tikzPngFiles" ["content" =: Binary content, "hash" =: h, "repoId" =: repoId]
+        selectSt = Select {selector = ["fileHash" =: hash], coll =" activities"}    
+
+writeTitleToMongo :: Map.Map String String -> IO ()
+writeTitleToMongo meta  =
+    let 
+        hash = case Map.lookup "hash" meta of
+            Just x -> x
+            Nothing -> error "File hash not included in filter metadata."
+        title = case Map.lookup "title" meta of
+            Just x -> x
+            Nothing -> error "Title not included in file metadata."
+        runMongo $ repsert selectSt ["title" =: title]
+    where
+        selectSt = Select {selector = ["fileHash" =: hash], coll =" activities"}
+
 
 -- | Turn latex RawBlocks for the given environment into Divs with that environment as their class.
 -- Normally, these blocks are ignored by HTML writer. -}
@@ -172,8 +193,11 @@ environmentFilter e meta b@(RawBlock (Format "latex") s) =
                                 return $ Div ("", classes, attributes) blocks
                             EnvSpan -> do
                                 return $ Plain [Span ("", classes, attributes) [Str content]]
-                            AnswerDiv -> do
-                                return $ Div ("", classes, attributes ++ [("data-answer", content)]) []
+                            AnswerSpan -> do
+                                return $ Plain [Span ("", classes, attributes ++ [("data-answer", content)]) []]
+                            DescriptionMeta -> do
+                                writeDescriptionToMongo meta content
+                                return Plain [Span ("", classes, attributes) [Str content]]
                             MultipleChoiceDiv -> do
                                 blocks <- parseRawBlock content meta
                                 return $ Div ("", classes, attributes ++ [("data-answer", "correct")]) blocks
@@ -250,5 +274,34 @@ toJSONFilterMeta f =
         let meta = case doc of
                        Pandoc m _ -> unMeta m
         processedDoc <- (walkM (f meta) :: Pandoc -> IO Pandoc) $ doc
+        -- Merge inline commands with adjacent paragraphs
+        let finalDoc = (unwrapPandoc . mergePList . wrapPandoc) processedDoc
         -- TODO: Put some metadata blocks at the beginning with repoId, activity hash.  Pass activity hash from activity service.
-        BL.putStr . encode $ processedDoc
+        BL.putStr . encode $ finalDoc
+
+
+-- Wrap in an extra div so top level can be accessed as block.
+wrapPandoc :: Pandoc -> Pandoc
+wrapPandoc (Pandoc m s) = Pandoc m (Div ("", [], []) s))
+
+unwrapPandoc :: Pandoc -> Pandoc
+unwrapPandoc (Pandoc m (Div ("", [], []) s)) = Pandoc m s
+unwrapPandoc x = x
+
+--foldM :: Monad m => (a -> b -> m a) -> a -> [b] -> m a
+mergePList :: [Block] -> [Block]
+mergePList x:xs = foldM mergeAdjacent x xs
+
+mergeAdjacent :: Block -> Block -> [Block]
+mergeAdjacent a@(Paragraph i) b@(Plain [Span (classes, _, _) _]) =
+    if (length (intersect classes inlineEnvironments)) > 0
+        [Paragraph (i ++ [b])]
+    else
+        [a, b]
+mergeAdjacent a@(Plain [Span (classes, _, _) _]) b@(Paragraph i) 
+    if (length (intersect classes inlineEnvironments)) > 0
+        [Paragraph ([a] ++ i)]
+    else
+        [a, b]
+mergeAdjacent a b = [a,b]
+
