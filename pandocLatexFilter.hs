@@ -3,6 +3,7 @@
 
 import Prelude hiding (catch)
 
+import Data.List
 import Control.Monad
 import Text.Pandoc
 import Text.Pandoc.Walk
@@ -35,7 +36,7 @@ environtmentMappings = Map.fromList [
     ("abstract", (DescriptionMeta, ["description"], [("ximera-description", "")])),
     ("answer", (AnswerSpan, ["answer"], [("ximera-answer", "")])),
     ("youtube", (EnvDiv, ["youtube"], [("ximera-youtube", "")])),
-    ("answer", (AnswerDiv, ["answer"], [("ximera-answer", "ximera-answer")])),
+    ("answer", (AnswerSpan, ["answer"], [("ximera-answer", "ximera-answer")])),
     ("choice", (ChoiceDiv, ["choice"], [("ximera-choice", "")])),
     ("multiple-choice", (MultipleChoiceDiv, ["multiple-choice"], [("ximera-multiple-choice", "")]))]
 
@@ -124,7 +125,7 @@ tikzFilter repoId b@(RawBlock (Format "latex") s) =
                 return b
 tikzFilter _ b = return b
 
-runMongo :: MonadIO m => Action m a -> IO ()
+runMongo :: Action IO a -> IO ()
 runMongo run =
     do
         mongoHost <- getEnv "XIMERA_MONGO_URL"
@@ -132,7 +133,7 @@ runMongo run =
         pipe <- runIOE $ connect (host mongoHost)
         err <- access pipe master (T.pack mongoDatabase) run
         case err of
-            Left _ -> error (show err)
+            Left errStr -> error (show errStr)
             Right _ -> close pipe    
 
 
@@ -140,25 +141,29 @@ addPngFileToMongo :: B.ByteString -> Int -> T.Text -> IO ()
 addPngFileToMongo content h repoId =
     runMongo $ insert_ "tikzPngFiles" ["content" =: Binary content, "hash" =: h, "repoId" =: repoId]
 
-writeDescriptionToMongo :: Map.Map String String -> String -> IO ()
+writeDescriptionToMongo :: Map.Map String MetaValue -> String -> IO ()
 writeDescriptionToMongo meta description =
-    runMongo $ repsert selectSt ["description" =: description]
-    where
-        selectSt = Select {selector = ["fileHash" =: hash], coll =" activities"}    
+    let 
+        hash = case Map.lookup "hash" meta of
+            Just (MetaString x) -> x
+            _ -> error "File hash not included in filter metadata."
+        selectSt = Select {selector = ["fileHash" =: hash], coll = "activities"}  
+    in    
+        runMongo $ repsert selectSt ["description" =: description]
+          
 
-writeTitleToMongo :: Map.Map String String -> IO ()
+writeTitleToMongo :: Map.Map String MetaValue -> IO ()
 writeTitleToMongo meta  =
     let 
         hash = case Map.lookup "hash" meta of
-            Just x -> x
-            Nothing -> error "File hash not included in filter metadata."
+            Just (MetaString x) -> x
+            _ -> error "File hash not included in filter metadata."
         title = case Map.lookup "title" meta of
-            Just x -> x
-            Nothing -> error "Title not included in file metadata."
-        runMongo $ repsert selectSt ["title" =: title]
-    where
+            Just (MetaString x) -> x
+            _ -> error "Title not included in file metadata."
         selectSt = Select {selector = ["fileHash" =: hash], coll =" activities"}
-
+    in
+        runMongo $ repsert selectSt ["title" =: title]
 
 -- | Turn latex RawBlocks for the given environment into Divs with that environment as their class.
 -- Normally, these blocks are ignored by HTML writer. -}
@@ -179,7 +184,7 @@ environmentFilter e meta b@(RawBlock (Format "latex") s) =
                         True -> parseInlineRequiredParameters rawContent
                         False -> [rawContent]
                 -- Convenience variable for environments not using required parameters.
-                content = head contentChunks
+                content = head requiredParameters
                 (envType, baseClasses, baseAttributes) = case Map.lookup e environtmentMappings of
                     Just x -> x
                     Nothing -> error "This shouldn't happen: couldn't find environment in environmentMappings."
@@ -199,14 +204,14 @@ environmentFilter e meta b@(RawBlock (Format "latex") s) =
                                 return $ Plain [Span ("", classes, attributes ++ [("data-answer", content)]) []]
                             DescriptionMeta -> do
                                 writeDescriptionToMongo meta content
-                                return Plain [Span ("", classes, attributes) [Str content]]
+                                return $ Plain [Span ("", classes, attributes) [Str content]]
                             MultipleChoiceDiv -> do
                                 blocks <- parseRawBlock content meta
                                 return $ Div ("", classes, attributes ++ [("data-answer", "correct")]) blocks
                             ChoiceDiv -> do
                                 -- TODO: Put correct/incorrect into this div from second argument.
                                 let value =
-                                        case contentChunks of
+                                        case requiredParameters of
                                             _:v:_ -> v
                                             _ -> ""
                                 return $ Div ("",classes, attributes ++ [("data-value",value)]) [Plain [Str content]]
@@ -220,7 +225,7 @@ pat :: String -> String -> [[String]]
 pat pattern str = str =~ pattern
 
 --Gives tuple of (beforeMatch, match, afterMatch)
-patTuple :: String -> (String, String, String)
+patTuple :: String -> String -> (String, String, String)
 patTuple pattern str = str =~ pattern
 
 -- Example: "{asdf}{qwer}" -> ["asdf", "qwer"]
@@ -235,7 +240,7 @@ parseOptionalParameters :: String -> [String]
 parseOptionalParameters content = map (!! 1) ((pat optionalParameterPattern content))
 
 removeOptionalParameters :: String -> String
-removeOptionalParameters (pat optionalParameterPattern content -> (_, _, remainder)) = remainder
+removeOptionalParameters ((\content -> patTuple optionalParameterPattern content) -> (_, _, remainder)) = remainder
 
 parseRawBlock :: String -> Map.Map String MetaValue -> IO [Block]
 parseRawBlock content meta =
@@ -259,7 +264,7 @@ findRepoId m =
     case Map.lookup "repoId" m of
         Just v -> case v of
                       MetaString s -> T.pack s
-                      _ -> error "No repo ID filter"
+                      _ -> error "No repo ID passed to filter"
         Nothing -> error "No repo ID passed to filter"
                     
 
@@ -277,32 +282,33 @@ toJSONFilterMeta f =
                        Pandoc m _ -> unMeta m
         processedDoc <- (walkM (f meta) :: Pandoc -> IO Pandoc) $ doc
         -- Merge inline commands with adjacent paragraphs
-        let finalDoc = (unwrapPandoc . mergePList . wrapPandoc) processedDoc
+        let (Pandoc _ processedBlocks) = processedDoc
+        let finalBlocks = (unwrapBlocks . mergePList . wrapBlocks) processedBlocks
         -- TODO: Put some metadata blocks at the beginning with repoId, activity hash.  Pass activity hash from activity service.
-        BL.putStr . encode $ finalDoc
+        BL.putStr . encode $ (Pandoc (Meta meta) finalBlocks)
 
 
 -- Wrap in an extra div so top level can be accessed as block.
-wrapPandoc :: Pandoc -> Pandoc
-wrapPandoc (Pandoc m s) = Pandoc m (Div ("", [], []) s))
+wrapBlocks :: [Block] -> [Block]
+wrapBlocks xs = [Div ("", [], []) xs]
 
-unwrapPandoc :: Pandoc -> Pandoc
-unwrapPandoc (Pandoc m (Div ("", [], []) s)) = Pandoc m s
-unwrapPandoc x = x
+unwrapBlocks :: [Block] -> [Block]
+unwrapBlocks [Div ("", [], []) xs] = xs
+unwrapBlocks x = x
 
 --foldM :: Monad m => (a -> b -> m a) -> a -> [b] -> m a
 mergePList :: [Block] -> [Block]
-mergePList x:xs = foldM mergeAdjacent x xs
+mergePList (x:xs) = foldM mergeAdjacent x xs
 
 mergeAdjacent :: Block -> Block -> [Block]
-mergeAdjacent a@(Paragraph i) b@(Plain [Span (classes, _, _) _]) =
-    if (length (intersect classes inlineEnvironments)) > 0
-        [Paragraph (i ++ [b])]
+mergeAdjacent a@(Para i) b@(Plain [s@(Span (_, classes, _) _)]) =
+    if (length (intersect (map T.pack classes) inlineEnvironments)) > 0 then
+        [Para (i ++ [s])]
     else
         [a, b]
-mergeAdjacent a@(Plain [Span (classes, _, _) _]) b@(Paragraph i) 
-    if (length (intersect classes inlineEnvironments)) > 0
-        [Paragraph ([a] ++ i)]
+mergeAdjacent a@(Plain [s@(Span (_, classes, _) _)]) b@(Para i) =
+    if (length (intersect (map T.pack classes) inlineEnvironments)) > 0 then
+        [Para ([s] ++ i)]
     else
         [a, b]
 mergeAdjacent a b = [a,b]
