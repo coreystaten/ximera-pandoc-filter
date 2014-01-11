@@ -67,17 +67,19 @@ compileTikzFile :: FilePath -- ^ The filename to compile.
 compileTikzFile toCompile target =
     do
         -- TODO: mupdf instead of convert?
-        -- TODO: Don't forget about security of running other people's pdflatex.  Either sandboxed version, or run this filter with low permissions.
-        --       Security plan:  Run the pandoc/filter process using a Linux container or other sandbox; do not acces MongoDB from the filter, but instead move that to Node
-        --                       service (since sandbox should disable network access); disable first line configuration of LaTeX files (so user can not enable \write18);
-        --                       make sure repos are extracted to distinct directories so that sandboxing does not share repo content.
+        -- TODO: Don't forget about security of
+        -- running other people's pdflatex.  Either sandboxed version, or run
+        -- this filter with low permissions.  Security plan: Run the
+        -- pandoc/filter process using a Linux container or other sandbox; do
+        -- not acces MongoDB from the filter, but instead move that to Node
+        -- service (since sandbox should disable network access); disable first
+        -- line configuration of LaTeX files (so user can not enable \write18);
+        -- make sure repos are extracted to distinct directories so that
+        -- sandboxing does not share repo content.
         pHandle <- runCommand $ T.unpack (T.concat ["pdflatex -output-directory=", T.pack $ dropFileName toCompile, " ", T.pack toCompile,  " > /dev/null && convert -density 600x600 ", toCompilePdf, " -quality 90 -resize 800x600 ", T.pack target, " > /dev/null"])
         exitCode <- waitForProcess pHandle
         removeFile $ T.unpack toCompilePdf
-        if exitCode == ExitSuccess then
-            return ()
-        else
-            error "Failure to compile tikzpicture to PNG."
+        unless (exitCode == ExitSuccess) (error "Failure to compile tikzpicture to PNG.")
     where toCompilePdf = T.replace ".tex" ".pdf" (T.pack toCompile)
 
 
@@ -90,8 +92,8 @@ tikzpictureToPng content =
         template <- tikzTemplate
         let renderedTex = renderTemplate template $ object ["picture" .= content]
         -- Write LaTeX to temporary file.
-        tempDirectory <- getTemporaryDirectory
-        (fileName, handle) <- openTempFile tempDirectory "tikz.tex"
+        tempDir <- getTemporaryDirectory
+        (fileName, handle) <- openTempFile tempDir "tikz.tex"
         hPutStr handle renderedTex
         hClose handle
 
@@ -99,42 +101,33 @@ tikzpictureToPng content =
         let pngFileName = T.unpack $ T.replace ".tex" ".png" (T.pack fileName)
         compileTikzFile fileName pngFileName
 
-        pngContent <- B.readFile pngFileName
+        B.readFile pngFileName
 
-        return pngContent
 
 tikzFilter :: T.Text -> Block -> IO Block
 tikzFilter repoId b@(RawBlock (Format "latex") s) =
-    let
-        sT = T.pack s
-    in 
-        do
-            if T.isPrefixOf ("\\begin{tikzpicture}") sT
-            then
-                do
-                    pngContent <- tikzpictureToPng sT
+  let sT = T.pack s
+  in if "\\begin{tikzpicture}" `T.isPrefixOf` sT then
+       do pngContent <- tikzpictureToPng sT
+          -- Hash PNG Contents, and use as id for image in new block returned.
+          let h = abs $ hash pngContent
 
-                    -- Hash PNG Contents, and use as id for image in new block returned.
-                    let h = abs $ hash pngContent
-
-                    -- Add file contents to MongoDB
-                    addPngFileToMongo pngContent h repoId
-                    
-                    return $ Plain [Image [] ("/tikzpictures/" ++ (show h), "Tikz Picture")]
-            else
-                return b
+          -- Add file contents to MongoDB
+          addPngFileToMongo pngContent h repoId
+          return $ Plain [Image [] ("/tikzpictures/" ++ show h, "Tikz Picture")]
+     else
+       return b
 tikzFilter _ b = return b
 
 runMongo :: Action IO a -> IO ()
-runMongo run =
-    do
-        mongoHost <- getEnv "XIMERA_MONGO_URL"
-        mongoDatabase <- getEnv "XIMERA_MONGO_DATABASE"
-        pipe <- runIOE $ connect (host mongoHost)
-        err <- access pipe master (T.pack mongoDatabase) run
-        case err of
-            Left errStr -> error (show errStr)
-            Right _ -> close pipe    
+runMongo run = do
+  mongoHost <- getEnv "XIMERA_MONGO_URL"
+  mongoDatabase <- getEnv "XIMERA_MONGO_DATABASE"
+  pipe <- runIOE $ connect (host mongoHost)
+  err <- access pipe master (T.pack mongoDatabase) run
+  case err of
+    Left errStr -> error (show errStr)
+    Right _ -> close pipe
 
 
 addPngFileToMongo :: B.ByteString -> Int -> T.Text -> IO ()
