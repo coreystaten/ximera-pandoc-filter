@@ -26,7 +26,8 @@ import Text.Regex.PCRE
 
 data EnvironmentType = EnvDiv | EnvSpan | AnswerSpan | ChoiceDiv | MultipleChoiceDiv | DescriptionMeta
 
-environtmentMappings :: Map.Map T.Text (EnvironmentType, [String], [(String,String)]) -- Type, classes, attributes
+-- Type, classes, attributes
+environtmentMappings :: Map.Map T.Text (EnvironmentType, [String], [(String,String)])
 environtmentMappings = Map.fromList [
     ("shuffle", (EnvDiv, ["shuffle"], [("ximera-shuffle", "")])),
     ("question", (EnvDiv, ["question"], [("ximera-question", ""), ("shuffleStatus", "shuffleStatus")])),
@@ -52,9 +53,9 @@ tikzTemplate :: IO Template
 tikzTemplate =
     do
         filterPath <- getEnv "XIMERA_FILTER_PATH"
-        let templatePath = (dropFileName filterPath) </> "tikz-template.tex"
+        let templatePath = dropFileName filterPath </> "tikz-template.tex"
         templateContents <- readFile templatePath
-        let result =  case (compileTemplate $ T.pack templateContents) of
+        let result =  case compileTemplate $ T.pack templateContents of
                           Left _ -> error "Unable to parse tikz-template.tex"
                           Right template -> template
         return result
@@ -136,80 +137,60 @@ addPngFileToMongo content h repoId =
 
 writeDescriptionToMongo :: Map.Map String MetaValue -> String -> IO ()
 writeDescriptionToMongo meta description =
-    let 
-        hash = case Map.lookup "hash" meta of
-            Just (MetaString x) -> x
-            _ -> error "File hash not included in filter metadata."
-        selectSt = Select {selector = ["fileHash" =: hash], coll = "activities"}  
-    in    
-        runMongo $ repsert selectSt ["description" =: description]
-          
+  let hash = case Map.lookup "hash" meta of
+        Just (MetaString x) -> x
+        _ -> error "File hash not included in filter metadata."
+      selectSt = Select {selector = ["fileHash" =: hash], coll = "activities"}
+  in runMongo $ repsert selectSt ["description" =: description]
 
 writeTitleToMongo :: Map.Map String MetaValue -> IO ()
 writeTitleToMongo meta  =
-    let 
-        hash = case Map.lookup "hash" meta of
-            Just (MetaString x) -> x
-            _ -> error "File hash not included in filter metadata."
-        title = case Map.lookup "title" meta of
-            Just (MetaString x) -> x
-            _ -> error "Title not included in file metadata."
-        selectSt = Select {selector = ["fileHash" =: hash], coll =" activities"}
-    in
-        runMongo $ repsert selectSt ["title" =: title]
+  let hash = case Map.lookup "hash" meta of
+        Just (MetaString x) -> x
+        _ -> error "File hash not included in filter metadata."
+      title = case Map.lookup "title" meta of
+        Just (MetaString x) -> x
+        _ -> error "Title not included in file metadata."
+      selectSt = Select {selector = ["fileHash" =: hash], coll =" activities"}
+  in runMongo $ repsert selectSt ["title" =: title]
 
 -- | Turn latex RawBlocks for the given environment into Divs with that environment as their class.
 -- Normally, these blocks are ignored by HTML writer. -}
 environmentFilter :: T.Text -> Map.Map String MetaValue -> Block -> IO Block
 environmentFilter e meta b@(RawBlock (Format "latex") s) =
-	let
-        sLen = length s
-    	eLen = T.length e
-    in
-		if T.isPrefixOf (T.concat ["\\begin{", e, "}"]) (T.pack s)
-		then
-            let
-                rawContent = drop (eLen + 8) $ take (sLen - (eLen + 6)) s
-                isInline = elem e inlineEnvironments
-                optionalParameters = parseOptionalParameters rawContent
-                requiredParameters = 
-                    case isInline of
-                        True -> parseInlineRequiredParameters rawContent
-                        False -> [rawContent]
-                -- Convenience variable for environments not using required parameters.
-                content = head requiredParameters
-                (envType, baseClasses, baseAttributes) = case Map.lookup e environtmentMappings of
-                    Just x -> x
-                    Nothing -> error "This shouldn't happen: couldn't find environment in environmentMappings."
-            in
-                do
-                    randId <- nextRandom
-                    let attributes = [("data-uuid", toString randId)] ++ baseAttributes
-                    let classes = baseClasses
-                    result <- 
-                        case envType of
-                            EnvDiv -> do
-                                blocks <- parseRawBlock content meta
-                                return $ Div ("", classes, attributes) blocks
-                            EnvSpan -> do
-                                return $ Plain [Span ("", classes, attributes) [Str content]]
-                            AnswerSpan -> do
-                                return $ Plain [Span ("", classes, attributes ++ [("data-answer", content)]) []]
-                            DescriptionMeta -> do
-                                writeDescriptionToMongo meta content
-                                return $ Plain [Span ("", classes, attributes) [Str content]]
-                            MultipleChoiceDiv -> do
-                                blocks <- parseRawBlock content meta
-                                return $ Div ("", classes, attributes ++ [("data-answer", "correct")]) blocks
-                            ChoiceDiv -> do
-                                -- TODO: Put correct/incorrect into this div from second argument.
-                                let value =
-                                        case requiredParameters of
-                                            _:v:_ -> v
-                                            _ -> ""
-                                return $ Div ("",classes, attributes ++ [("data-value",value)]) [Plain [Str content]]
-                    return result
-		else return b
+  let sLen = length s
+      eLen = T.length e
+  in if T.concat ["\\begin{", e, "}"] `T.isPrefixOf` T.pack s then
+       let rawContent = drop (eLen + 8) $ take (sLen - (eLen + 6)) s
+           isInline = elem e inlineEnvironments
+           optionalParameters = parseOptionalParameters rawContent
+           requiredParameters = if isInline then parseInlineRequiredParameters rawContent else [rawContent]
+           -- Convenience variable for environments not using required parameters.
+           content = head requiredParameters
+           (envType, baseClasses, baseAttributes) = fromMaybe (error "This shouldn't happen: couldn't find environment in environmentMappings.") (Map.lookup e environmentMappings)
+       in do
+         randId <- nextRandom
+         let attributes = ("data-uuid", toString randId) : baseAttributes
+         let classes = baseClasses
+         case envType of
+           EnvDiv -> do
+             blocks <- parseRawBlock content meta
+             return $ Div ("", classes, attributes) blocks
+           EnvSpan -> return Plain [Span ("", classes, attributes) [Str content]]
+           AnswerSpan -> return Plain [Span ("", classes, attributes ++ [("data-answer", content)]) []]
+           DescriptionMeta -> do
+             writeDescriptionToMongo meta content
+             return $ Plain [Span ("", classes, attributes) [Str content]]
+           MultipleChoiceDiv -> do
+             blocks <- parseRawBlock content meta
+             return $ Div ("", classes, attributes ++ [("data-answer", "correct")]) blocks
+           ChoiceDiv -> do
+             -- TODO: Put correct/incorrect into this div from second argument.
+             let value = case requiredParameters of
+                   _:v:_ -> v
+                   _ -> ""
+             return $ Div ("",classes, attributes ++ [("data-value",value)]) [Plain [Str content]]
+     else return b
 environmentFilter _ _ b = return b
 
 -- Helper methods; type checking doesn't want to work without this...
@@ -233,7 +214,7 @@ parseOptionalParameters :: String -> [String]
 parseOptionalParameters content = map (!! 1) ((pat optionalParameterPattern content))
 
 removeOptionalParameters :: String -> String
-removeOptionalParameters ((\content -> patTuple optionalParameterPattern content) -> (_, _, remainder)) = remainder
+removeOptionalParameters (patTuple optionalParameterPattern -> (_, _, remainder)) = remainder
 
 parseRawBlock :: String -> Map.Map String MetaValue -> IO [Block]
 parseRawBlock content meta =
@@ -245,7 +226,7 @@ parseRawBlock content meta =
 environmentFilters :: [Map.Map String MetaValue -> Block -> IO Block]
 environmentFilters = map environmentFilter environments
 
-substituteRawBlocks :: (Map.Map String MetaValue) -> Block -> IO Block
+substituteRawBlocks :: Map.Map String MetaValue -> Block -> IO Block
 substituteRawBlocks m x =
     do
         let repoId = findRepoId m
@@ -259,11 +240,9 @@ findRepoId m =
                       MetaString s -> T.pack s
                       _ -> error "No repo ID passed to filter"
         Nothing -> error "No repo ID passed to filter"
-                    
 
 main :: IO ()
-main = do
-    toJSONFilterMeta substituteRawBlocks
+main = toJSONFilterMeta substituteRawBlocks
 
 -- Modified version of toJSONFilter, also passing metadata.
 toJSONFilterMeta :: (Map.Map String MetaValue -> Block -> IO Block) -> IO ()
@@ -273,12 +252,12 @@ toJSONFilterMeta f =
         let doc = either error id . eitherDecode' $ jsonContents
         let meta = case doc of
                        Pandoc m _ -> unMeta m
-        processedDoc <- (walkM (f meta) :: Pandoc -> IO Pandoc) $ doc
+        processedDoc <- (walkM (f meta) :: Pandoc -> IO Pandoc) doc
         -- Merge inline commands with adjacent paragraphs
         let (Pandoc _ processedBlocks) = processedDoc
         let finalBlocks = (unwrapBlocks . mergePList . wrapBlocks) processedBlocks
         -- TODO: Put some metadata blocks at the beginning with repoId, activity hash.  Pass activity hash from activity service.
-        BL.putStr . encode $ (Pandoc (Meta meta) finalBlocks)
+        BL.putStr . encode $ Pandoc (Meta meta) finalBlocks
 
 
 -- Wrap in an extra div so top level can be accessed as block.
@@ -289,19 +268,18 @@ unwrapBlocks :: [Block] -> [Block]
 unwrapBlocks [Div ("", [], []) xs] = xs
 unwrapBlocks x = x
 
---foldM :: Monad m => (a -> b -> m a) -> a -> [b] -> m a
 mergePList :: [Block] -> [Block]
 mergePList (x:xs) = foldM mergeAdjacent x xs
 
 mergeAdjacent :: Block -> Block -> [Block]
 mergeAdjacent a@(Para i) b@(Plain [s@(Span (_, classes, _) _)]) =
-    if (length (intersect (map T.pack classes) inlineEnvironments)) > 0 then
+    if not (null (map T.pack classes `intersect` inlineEnvironments)) then
         [Para (i ++ [s])]
     else
         [a, b]
 mergeAdjacent a@(Plain [s@(Span (_, classes, _) _)]) b@(Para i) =
-    if (length (intersect (map T.pack classes) inlineEnvironments)) > 0 then
-        [Para ([s] ++ i)]
+    if not (null (map T.pack classes `intersect` inlineEnvironments)) then
+        [Para (s:i)]
     else
         [a, b]
 mergeAdjacent a b = [a,b]
