@@ -142,7 +142,7 @@ writeDescriptionToMongo meta description =
         Just (MetaString x) -> x
         _ -> error "File hash not included in filter metadata."
       selectSt = Select {selector = ["baseFileHash" =: hash], coll = "activities"}
-  in runMongo $ repsert selectSt ["description" =: description]
+  in runMongo $ modify selectSt ["$set" =: ["description" =: description]]
 
 writeTitleToMongo :: Map.Map String MetaValue -> IO ()
 writeTitleToMongo meta  =
@@ -150,10 +150,19 @@ writeTitleToMongo meta  =
         Just (MetaString x) -> x
         _ -> error "File hash not included in filter metadata."
       title = case Map.lookup "title" meta of
-        Just (MetaString x) -> x
+        Just x -> showTitle x
         _ -> error "Title not included in file metadata."
-      selectSt = Select {selector = ["baseFileHash" =: hash], coll =" activities"}
-  in runMongo $ repsert selectSt ["title" =: title]
+      selectSt = Select {selector = ["baseFileHash" =: hash], coll = "activities"}
+  in runMongo $ modify selectSt ["$set" =: ["title" =: title]]
+
+writeLogToMongo :: Map.Map String MetaValue -> String -> IO ()
+writeLogToMongo meta log =
+  let hash = case Map.lookup "hash" meta of
+        Just (MetaString x) -> x
+        _ -> error "File hash not included in filter metadata."
+      selectSt = Select {selector = [], coll = "activities"}
+  in runMongo $ modify selectSt ["$set" =: ["log" =: log]]
+
 
 -- | Turn latex RawBlocks for the given environment into Divs with that environment as their class.
 -- Normally, these blocks are ignored by HTML writer. -}
@@ -207,12 +216,12 @@ patTuple pattern str = str =~ pattern
 
 
 parseInlineRequiredParameters :: String -> [String]
-parseInlineRequiredParameters content = map (!! 1) ((pat "{([^}]*)}" content))
+parseInlineRequiredParameters content = map (!! 1) (pat "{([^}]*)}" content)
 
 optionalParameterPattern = "^\\[([^\\]])\\]*"
 
 parseOptionalParameters :: String -> [String]
-parseOptionalParameters content = map (!! 1) ((pat optionalParameterPattern content))
+parseOptionalParameters content = map (!! 1) (pat optionalParameterPattern content)
 
 removeOptionalParameters :: String -> String
 removeOptionalParameters (patTuple optionalParameterPattern -> (_, _, remainder)) = remainder
@@ -222,7 +231,7 @@ parseRawBlock content meta =
     let
         (Pandoc _ blocks) = readLaTeX (def {readerParseRaw = True}) content
     in
-        sequence $ map (substituteRawBlocks meta) blocks
+        mapM (substituteRawBlocks meta) blocks
 
 environmentFilters :: [Map.Map String MetaValue -> Block -> IO Block]
 environmentFilters = map environmentFilter environments
@@ -253,6 +262,7 @@ toJSONFilterMeta f =
         let doc = either error id . eitherDecode' $ jsonContents
         let meta = case doc of
                        Pandoc m _ -> unMeta m
+        writeLogToMongo meta (show meta) -- TODO: Remove
         writeTitleToMongo meta
         processedDoc <- (walkM (f meta) :: Pandoc -> IO Pandoc) doc
         -- Merge inline commands with adjacent paragraphs
@@ -286,3 +296,14 @@ mergeAdjacent a@(Plain [s@(Span (_, classes, _) _)]) b@(Para i) =
         [a, b]
 mergeAdjacent a b = [a,b]
 
+
+-- Print title from meta value.  metaValueToJSON is hidden for some reason, so we can't use it.
+showTitle :: MetaValue -> String
+showTitle (MetaInlines xs) = showTitle' "" xs
+  where showTitle' s (x:xs) = case x of
+          Str s' -> showTitle' (s ++ s') xs
+          Space -> showTitle' (s ++ " ") xs
+          _ -> showTitle' "Error parsing title" xs
+        showTitle' s [] = s
+showTitle (MetaString x) = x
+showtitle _ = "Error parsing title."
