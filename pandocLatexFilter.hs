@@ -4,6 +4,7 @@
 import Prelude hiding (catch)
 
 import Data.List
+import Data.Maybe
 import Control.Monad
 import Text.Pandoc
 import Text.Pandoc.Walk
@@ -27,8 +28,8 @@ import Text.Regex.PCRE
 data EnvironmentType = EnvDiv | EnvSpan | AnswerSpan | ChoiceDiv | MultipleChoiceDiv | DescriptionMeta
 
 -- Type, classes, attributes
-environtmentMappings :: Map.Map T.Text (EnvironmentType, [String], [(String,String)])
-environtmentMappings = Map.fromList [
+environmentMappings :: Map.Map T.Text (EnvironmentType, [String], [(String,String)])
+environmentMappings = Map.fromList [
     ("shuffle", (EnvDiv, ["shuffle"], [("ximera-shuffle", "")])),
     ("question", (EnvDiv, ["question"], [("ximera-question", ""), ("shuffleStatus", "shuffleStatus")])),
     ("exercise", (EnvDiv, ["exercise"], [("ximera-exercise", ""), ("shuffleStatus", "shuffleStatus")])),
@@ -42,7 +43,7 @@ environtmentMappings = Map.fromList [
     ("multiple-choice", (MultipleChoiceDiv, ["multiple-choice"], [("ximera-multiple-choice", "")]))]
 
 environments :: [T.Text]
-environments = Map.keys environtmentMappings
+environments = Map.keys environmentMappings
 
 -- List of environments coming from inline commands; require parsing of arguments.
 inlineEnvironments :: [T.Text]
@@ -140,7 +141,7 @@ writeDescriptionToMongo meta description =
   let hash = case Map.lookup "hash" meta of
         Just (MetaString x) -> x
         _ -> error "File hash not included in filter metadata."
-      selectSt = Select {selector = ["fileHash" =: hash], coll = "activities"}
+      selectSt = Select {selector = ["baseFileHash" =: hash], coll = "activities"}
   in runMongo $ repsert selectSt ["description" =: description]
 
 writeTitleToMongo :: Map.Map String MetaValue -> IO ()
@@ -151,7 +152,7 @@ writeTitleToMongo meta  =
       title = case Map.lookup "title" meta of
         Just (MetaString x) -> x
         _ -> error "Title not included in file metadata."
-      selectSt = Select {selector = ["fileHash" =: hash], coll =" activities"}
+      selectSt = Select {selector = ["baseFileHash" =: hash], coll =" activities"}
   in runMongo $ repsert selectSt ["title" =: title]
 
 -- | Turn latex RawBlocks for the given environment into Divs with that environment as their class.
@@ -176,8 +177,8 @@ environmentFilter e meta b@(RawBlock (Format "latex") s) =
            EnvDiv -> do
              blocks <- parseRawBlock content meta
              return $ Div ("", classes, attributes) blocks
-           EnvSpan -> return Plain [Span ("", classes, attributes) [Str content]]
-           AnswerSpan -> return Plain [Span ("", classes, attributes ++ [("data-answer", content)]) []]
+           EnvSpan -> return $ Plain [Span ("", classes, attributes) [Str content]]
+           AnswerSpan -> return $ Plain [Span ("", classes, attributes ++ [("data-answer", content)]) []]
            DescriptionMeta -> do
              writeDescriptionToMongo meta content
              return $ Plain [Span ("", classes, attributes) [Str content]]
@@ -252,6 +253,7 @@ toJSONFilterMeta f =
         let doc = either error id . eitherDecode' $ jsonContents
         let meta = case doc of
                        Pandoc m _ -> unMeta m
+        writeTitleToMongo meta
         processedDoc <- (walkM (f meta) :: Pandoc -> IO Pandoc) doc
         -- Merge inline commands with adjacent paragraphs
         let (Pandoc _ processedBlocks) = processedDoc
