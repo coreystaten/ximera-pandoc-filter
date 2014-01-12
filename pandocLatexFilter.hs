@@ -196,8 +196,8 @@ environmentFilter e meta b@(RawBlock (Format "latex") s) =
              return $ Div ("", classes, attributes ++ [("data-answer", "correct")]) blocks
            ChoiceDiv -> do
              -- TODO: Put correct/incorrect into this div from second argument.
-             let value = case requiredParameters of
-                   _:v:_ -> v
+             let value = case optionalParameters of
+                   v:_ -> v
                    _ -> ""
              return $ Div ("",classes, attributes ++ [("data-value",value)]) [Plain [Str content]]
      else return b
@@ -218,7 +218,7 @@ patTuple pattern str = str =~ pattern
 parseInlineRequiredParameters :: String -> [String]
 parseInlineRequiredParameters content = map (!! 1) (pat "{([^}]*)}" content)
 
-optionalParameterPattern = "^\\[([^\\]])\\]*"
+optionalParameterPattern = "^\\[([^\\]]*)\\]"
 
 parseOptionalParameters :: String -> [String]
 parseOptionalParameters content = map (!! 1) (pat optionalParameterPattern content)
