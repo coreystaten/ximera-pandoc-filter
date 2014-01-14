@@ -25,7 +25,16 @@ import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
 import Text.Regex.PCRE
 
-data EnvironmentType = EnvDiv | EnvSpan | AnswerSpan | ChoiceDiv | MultipleChoiceDiv | DescriptionMeta | IncludeGraphicsDiv | TikzPictureDiv
+data EnvironmentType = EnvDiv
+                     | EnvSpan
+                     | Answer
+                     | Choice
+                     | MultipleChoice
+                     | Abstract
+                     | IncludeGraphics
+                     | TikzPicture
+                     | ActivityTitle
+                     | ShortDescription
 
 -- Type, classes, attributes
 environmentMappings :: Map.Map T.Text (EnvironmentType, [String], [(String,String)])
@@ -35,21 +44,23 @@ environmentMappings = Map.fromList [
     ("exercise", (EnvDiv, ["exercise"], [("ximera-exercise", ""), ("shuffleStatus", "shuffleStatus")])),
     ("exploration", (EnvDiv, ["exploration"], [("ximera-exploration", ""), ("shuffleStatus", "shuffleStatus")])),
     ("solution", (EnvDiv, ["solution"], [("ximera-solution", "")])),
-    ("abstract", (DescriptionMeta, ["description"], [("ximera-description", "")])),
-    ("answer", (AnswerSpan, ["answer"], [("ximera-answer", "")])),
+    ("abstract", (Abstract, [], [])),
+    ("answer", (Answer, ["answer"], [("ximera-answer", "")])),
     ("youtube", (EnvDiv, ["youtube"], [("ximera-youtube", "")])),
-    ("answer", (AnswerSpan, ["answer"], [("ximera-answer", "ximera-answer")])),
-    ("choice", (ChoiceDiv, ["choice"], [("ximera-choice", "")])),
-    ("multiple-choice", (MultipleChoiceDiv, ["multiple-choice"], [("ximera-multiple-choice", "")])),
-    ("includegraphics", (IncludeGraphicsDiv, [], [])),
-    ("tikzpicture", (TikzPictureDiv, [], []))]
+    ("answer", (Answer, ["answer"], [("ximera-answer", "ximera-answer")])),
+    ("choice", (Choice, ["choice"], [("ximera-choice", "")])),
+    ("multiple-choice", (MultipleChoice, ["multiple-choice"], [("ximera-multiple-choice", "")])),
+    ("includegraphics", (IncludeGraphics, [], [])),
+    ("tikzpicture", (TikzPicture, [], [])),
+    ("activitytitle", (ActivityTitle, [], [])),
+    ("shortdescription", (ShortDescription, [], []))]
 
 environments :: [T.Text]
 environments = Map.keys environmentMappings
 
 -- List of environments coming from inline commands; require parsing of arguments.
 inlineEnvironments :: [T.Text]
-inlineEnvironments = ["choice", "answer", "includegraphics"]
+inlineEnvironments = ["choice", "answer", "includegraphics", "activitytitle", "shortdescription"]
 
 -- | The template to use for tikzpictures from the filter, loaded from tikz-template.tex
 tikzTemplate :: IO Template
@@ -146,14 +157,17 @@ writeDescriptionToMongo meta description =
       selectSt = Select {selector = ["baseFileHash" =: hash], coll = "activities"}
   in runMongo $ modify selectSt ["$set" =: ["description" =: description]]
 
-writeTitleToMongo :: Map.Map String MetaValue -> IO ()
-writeTitleToMongo meta  =
+writeMetaTitleToMongo :: Map.Map String MetaValue -> IO ()
+writeMetaTitleToMongo meta  =
+  case Map.lookup "title" meta of
+        Just x -> writeTitleToMongo meta (showTitle x)
+        _ -> return ()
+
+writeTitleToMongo :: Map.Map String MetaValue -> String -> IO ()
+writeTitleToMongo meta title =
   let hash = case Map.lookup "hash" meta of
         Just (MetaString x) -> x
         _ -> error "File hash not included in filter metadata."
-      title = case Map.lookup "title" meta of
-        Just x -> showTitle x
-        _ -> error "Title not included in file metadata."
       selectSt = Select {selector = ["baseFileHash" =: hash], coll = "activities"}
   in runMongo $ modify selectSt ["$set" =: ["title" =: title]]
 
@@ -189,25 +203,31 @@ environmentFilter e meta b@(RawBlock (Format "latex") s) =
              blocks <- parseRawBlock content meta
              return $ Div ("", classes, attributes) blocks
            EnvSpan -> return $ Plain [Span ("", classes, attributes) [Str content]]
-           AnswerSpan -> return $ Plain [Span ("", classes, attributes ++ [("data-answer", content)]) []]
-           DescriptionMeta -> do
+           Answer -> return $ Plain [Span ("", classes, attributes ++ [("data-answer", content)]) []]
+           Abstract -> do
              writeDescriptionToMongo meta content
-             return $ Div ("", classes, attributes) [Plain [Str content]]
-           MultipleChoiceDiv -> do
+             return $ Plain []
+           ShortDescription -> do
+             writeDescriptionToMongo meta content
+             return $ Plain []
+           ActivityTitle -> do
+             writeTitleToMongo meta content
+             return $ Plain []
+           MultipleChoice -> do
              blocks <- parseRawBlock content meta
              return $ Div ("", classes, attributes ++ [("data-answer", "correct")]) blocks
-           ChoiceDiv -> do
+           Choice -> do
              -- TODO: Put correct/incorrect into this div from second argument.
              let value = case optionalParameters of
                    v:_ -> v
                    _ -> ""
              return $ Div ("",classes, attributes ++ [("data-value",value)]) [Plain [Str content]]
-           TikzPictureDiv -> do
+           TikzPicture -> do
              pngContent <- tikzpictureToPng (T.pack content)
              -- Add file contents to MongoDB
              h <- addImageToMongo meta "image/png" pngContent
              return $ Plain [Image [] ("/image/" ++ show h, "Tikz Picture")]
-           IncludeGraphicsDiv -> do
+           IncludeGraphics -> do
              let filename = content
                  dotIndex = fromMaybe (error "No file extension for image") $ elemIndex '.' (reverse filename)
                  extension = drop (length content - dotIndex) filename
@@ -286,7 +306,7 @@ toJSONFilterMeta f =
         let meta = case doc of
                        Pandoc m _ -> unMeta m
         writeLogToMongo meta (show meta) -- TODO: Remove
-        writeTitleToMongo meta
+        writeMetaTitleToMongo meta
         processedDoc <- (walkM (f meta) :: Pandoc -> IO Pandoc) doc
         -- Merge inline commands with adjacent paragraphs
         let (Pandoc _ processedBlocks) = processedDoc
