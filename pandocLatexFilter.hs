@@ -290,34 +290,27 @@ toJSONFilterMeta f =
         processedDoc <- (walkM (f meta) :: Pandoc -> IO Pandoc) doc
         -- Merge inline commands with adjacent paragraphs
         let (Pandoc _ processedBlocks) = processedDoc
-        let finalBlocks = (unwrapBlocks . mergePList . wrapBlocks) processedBlocks
+        let finalBlocks = mergeAdjacent processedBlocks
         -- TODO: Put some metadata blocks at the beginning with repoId, activity hash.  Pass activity hash from activity service.
         BL.putStr . encode $ Pandoc (Meta meta) finalBlocks
 
-
--- Wrap in an extra div so top level can be accessed as block.
-wrapBlocks :: [Block] -> [Block]
-wrapBlocks xs = [Div ("", [], []) xs]
-
-unwrapBlocks :: [Block] -> [Block]
-unwrapBlocks [Div ("", [], []) xs] = xs
-unwrapBlocks x = x
-
-mergePList :: [Block] -> [Block]
-mergePList (x:xs) = foldM mergeAdjacent x xs
-
-mergeAdjacent :: Block -> Block -> [Block]
-mergeAdjacent a@(Para i) b@(Plain [s@(Span (_, classes, _) _)]) =
+mergeAdjacent :: [Block] -> [Block]
+mergeAdjacent (a@(Para i) : b@(Plain [s@(Span (_, classes, _) _)]) : xs) =
     if not (null (map T.pack classes `intersect` inlineEnvironments)) then
-        [Para (i ++ [s])]
+      Para (i ++ [s]):xs
     else
-        [a, b]
-mergeAdjacent a@(Plain [s@(Span (_, classes, _) _)]) b@(Para i) =
+      a:mergeAdjacent (b:xs)
+mergeAdjacent (a@(Plain [s@(Span (_, classes, _) _)]):b@(Para i):xs) =
     if not (null (map T.pack classes `intersect` inlineEnvironments)) then
-        [Para (s:i)]
+      Para (s:i):xs
     else
-        [a, b]
-mergeAdjacent a b = [a,b]
+      a:mergeAdjacent (b:xs)
+mergeAdjacent (a:xs) = mergeInElement a : mergeAdjacent xs
+mergeAdjacent [] = []
+
+mergeInElement :: Block -> Block
+mergeInElement (Div a xs) = Div a $ mergeAdjacent xs
+mergeInElement x = x
 
 
 -- Print title from meta value.  metaValueToJSON is hidden for some reason, so we can't use it.
