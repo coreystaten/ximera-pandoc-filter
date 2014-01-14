@@ -25,7 +25,7 @@ import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
 import Text.Regex.PCRE
 
-data EnvironmentType = EnvDiv | EnvSpan | AnswerSpan | ChoiceDiv | MultipleChoiceDiv | DescriptionMeta
+data EnvironmentType = EnvDiv | EnvSpan | AnswerSpan | ChoiceDiv | MultipleChoiceDiv | DescriptionMeta | IncludeGraphicsDiv | TikzPictureDiv
 
 -- Type, classes, attributes
 environmentMappings :: Map.Map T.Text (EnvironmentType, [String], [(String,String)])
@@ -40,14 +40,16 @@ environmentMappings = Map.fromList [
     ("youtube", (EnvDiv, ["youtube"], [("ximera-youtube", "")])),
     ("answer", (AnswerSpan, ["answer"], [("ximera-answer", "ximera-answer")])),
     ("choice", (ChoiceDiv, ["choice"], [("ximera-choice", "")])),
-    ("multiple-choice", (MultipleChoiceDiv, ["multiple-choice"], [("ximera-multiple-choice", "")]))]
+    ("multiple-choice", (MultipleChoiceDiv, ["multiple-choice"], [("ximera-multiple-choice", "")])),
+    ("includegraphics", (IncludeGraphicsDiv, [], [])),
+    ("tikzpicture", (TikzPictureDiv, [], []))]
 
 environments :: [T.Text]
 environments = Map.keys environmentMappings
 
 -- List of environments coming from inline commands; require parsing of arguments.
 inlineEnvironments :: [T.Text]
-inlineEnvironments = ["choice", "answer", "activitytitle", "headline"]
+inlineEnvironments = ["choice", "answer", "includegraphics"]
 
 -- | The template to use for tikzpictures from the filter, loaded from tikz-template.tex
 tikzTemplate :: IO Template
@@ -78,12 +80,20 @@ compileTikzFile toCompile target =
         -- line configuration of LaTeX files (so user can not enable \write18);
         -- make sure repos are extracted to distinct directories so that
         -- sandboxing does not share repo content.
-        pHandle <- runCommand $ T.unpack (T.concat ["pdflatex -output-directory=", T.pack $ dropFileName toCompile, " ", T.pack toCompile,  " > /dev/null && convert -density 600x600 ", toCompilePdf, " -quality 90 -resize 800x600 ", T.pack target, " > /dev/null"])
+        pHandle <- runCommand $ T.unpack (T.concat ["pdflatex -output-directory=", T.pack $ dropFileName toCompile, " ", T.pack toCompile,  " > /dev/null && mudraw -o ", T.pack target, " ", toCompilePdf, " > /dev/null"])
         exitCode <- waitForProcess pHandle
         removeFile $ T.unpack toCompilePdf
         unless (exitCode == ExitSuccess) (error "Failure to compile tikzpicture to PNG.")
     where toCompilePdf = T.replace ".tex" ".pdf" (T.pack toCompile)
 
+compilePdfToPng :: T.Text -- ^ The pdf file name.
+                -> IO B.ByteString -- ^ The content of the resulting PNG file
+compilePdfToPng pdfFilename = do
+  pHandle <- runCommand $ T.unpack (T.concat ["mudraw -o ", pngFilename, " ", pdfFilename])
+  exitCode <- waitForProcess pHandle
+  unless (exitCode == ExitSuccess) (error "Failure to compile PDF to PNG.")
+  B.readFile $ T.unpack pngFilename
+  where pngFilename = T.replace ".pdf" ".png" pdfFilename
 
 -- | Given content of tikzpicture environment, compile to PNG and return the contents.
 tikzpictureToPng :: T.Text      -- ^ The contents of the tikzpicture environment.
@@ -106,20 +116,6 @@ tikzpictureToPng content =
         B.readFile pngFileName
 
 
-tikzFilter :: T.Text -> Block -> IO Block
-tikzFilter repoId b@(RawBlock (Format "latex") s) =
-  let sT = T.pack s
-  in if "\\begin{tikzpicture}" `T.isPrefixOf` sT then
-       do pngContent <- tikzpictureToPng sT
-          -- Hash PNG Contents, and use as id for image in new block returned.
-          let h = abs $ hash pngContent
-
-          -- Add file contents to MongoDB
-          addPngFileToMongo pngContent h repoId
-          return $ Plain [Image [] ("/tikzpictures/" ++ show h, "Tikz Picture")]
-     else
-       return b
-tikzFilter _ b = return b
 
 runMongo :: Action IO a -> IO ()
 runMongo run = do
@@ -132,9 +128,15 @@ runMongo run = do
     Right _ -> close pipe
 
 
-addPngFileToMongo :: B.ByteString -> Int -> T.Text -> IO ()
-addPngFileToMongo content h repoId =
-    runMongo $ insert_ "tikzPngFiles" ["content" =: Binary content, "hash" =: h, "repoId" =: repoId]
+addImageToMongo :: Map.Map String MetaValue -> T.Text -> B.ByteString -> IO Int
+addImageToMongo meta mimetype content =
+  let repoId = case Map.lookup "repoId" meta of
+        Just (MetaString x) -> x
+        _ -> error "repoID not included in filter metadata."
+      h = abs $ hash content
+  in do
+    runMongo $ repsert Select {selector = ["hash" =: h], coll = "imageFiles"} ["content" =: Binary content, "hash" =: h, "repo" =: repoId, "mimetype" =: mimetype]
+    return h
 
 writeDescriptionToMongo :: Map.Map String MetaValue -> String -> IO ()
 writeDescriptionToMongo meta description =
@@ -190,7 +192,7 @@ environmentFilter e meta b@(RawBlock (Format "latex") s) =
            AnswerSpan -> return $ Plain [Span ("", classes, attributes ++ [("data-answer", content)]) []]
            DescriptionMeta -> do
              writeDescriptionToMongo meta content
-             return $ Plain [Span ("", classes, attributes) [Str content]]
+             return $ Div ("", classes, attributes) [Plain [Str content]]
            MultipleChoiceDiv -> do
              blocks <- parseRawBlock content meta
              return $ Div ("", classes, attributes ++ [("data-answer", "correct")]) blocks
@@ -200,6 +202,30 @@ environmentFilter e meta b@(RawBlock (Format "latex") s) =
                    v:_ -> v
                    _ -> ""
              return $ Div ("",classes, attributes ++ [("data-value",value)]) [Plain [Str content]]
+           TikzPictureDiv -> do
+             pngContent <- tikzpictureToPng (T.pack content)
+             -- Add file contents to MongoDB
+             h <- addImageToMongo meta "image/png" pngContent
+             return $ Plain [Image [] ("/image/" ++ show h, "Tikz Picture")]
+           IncludeGraphicsDiv -> do
+             let filename = content
+                 dotIndex = fromMaybe (error "No file extension for image") $ elemIndex '.' (reverse filename)
+                 extension = drop (length content - dotIndex) filename
+             let imageMimeType = case extension of
+                   "png" -> "image/png"
+                   "jpg" -> "image/jpeg"
+                   "jpeg"-> "image/jpeg"
+                   "pdf" -> "image/png"
+                   _ -> error ("Unknown image type for " ++ extension)
+             -- TODO: Sandbox so this can only read files from the current directory?
+             h <- case extension of
+               "pdf" -> do
+                 pdfContent <- compilePdfToPng $ T.pack filename
+                 addImageToMongo meta (T.pack imageMimeType) pdfContent
+               _ -> do
+                 imageContent <- B.readFile content
+                 addImageToMongo meta (T.pack imageMimeType) imageContent
+             return $ Plain [Image [] ("/image/" ++ show h, "Included Graphic")]
      else return b
 environmentFilter _ _ b = return b
 
@@ -238,10 +264,7 @@ environmentFilters = map environmentFilter environments
 
 substituteRawBlocks :: Map.Map String MetaValue -> Block -> IO Block
 substituteRawBlocks m x =
-    do
-        let repoId = findRepoId m
-        y <- foldM (flip ($)) x (map ($ m) environmentFilters)
-        tikzFilter repoId y
+    foldM (flip ($)) x (map ($ m) environmentFilters)
 
 findRepoId :: Map.Map String MetaValue -> T.Text
 findRepoId m =
