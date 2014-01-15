@@ -181,6 +181,9 @@ writeLogToMongo meta log =
   in runMongo $ modify selectSt ["$set" =: ["log" =: log]]
 
 
+stripDollars :: String -> String
+stripDollars = (takeWhile (not .(== '$'))) . (dropWhile (== '$'))
+
 -- | Turn latex RawBlocks for the given environment into Divs with that environment as their class.
 -- Normally, these blocks are ignored by HTML writer. -}
 environmentFilter :: T.Text -> Map.Map String MetaValue -> Block -> IO Block
@@ -204,7 +207,7 @@ environmentFilter e meta b@(RawBlock (Format "latex") s) =
              blocks <- parseRawBlock content meta
              return $ Div ("", classes, attributes) blocks
            EnvSpan -> return $ Plain [Span ("", classes, attributes) [Str content]]
-           Answer -> return $ Plain [Span ("", classes, attributes ++ [("data-answer", content)]) []]
+           Answer -> return $ Plain [Span ("", classes, attributes ++ [("data-answer", stripDollars content)]) []]
            Abstract -> do
              writeDescriptionToMongo meta content
              return $ Plain []
