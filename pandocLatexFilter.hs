@@ -53,7 +53,8 @@ environmentMappings = Map.fromList [
     ("includegraphics", (IncludeGraphics, [], [])),
     ("tikzpicture", (TikzPicture, [], [])),
     ("activitytitle", (ActivityTitle, [], [])),
-    ("shortdescription", (ShortDescription, [], []))]
+    ("shortdescription", (ShortDescription, [], [])),
+    ("hint", (EnvDiv, ["hint"], [("ximera-hint", "")]))]
 
 environments :: [T.Text]
 environments = Map.keys environmentMappings
@@ -132,7 +133,7 @@ runMongo :: Action IO a -> IO ()
 runMongo run = do
   mongoHost <- getEnv "XIMERA_MONGO_URL"
   mongoDatabase <- getEnv "XIMERA_MONGO_DATABASE"
-  pipe <- runIOE $ connect (host mongoHost)
+  pipe <- runIOE $ connect (readHostPort mongoHost)
   err <- access pipe master (T.pack mongoDatabase) run
   case err of
     Left errStr -> error (show errStr)
