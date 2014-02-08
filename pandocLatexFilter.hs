@@ -24,17 +24,20 @@ import Database.MongoDB hiding (lookup, replace, runCommand)
 import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
 import Text.Regex.PCRE
+import Text.LaTeX.Base.Parser
+import Text.LaTeX.Base.Syntax
 
 data EnvironmentType = EnvDiv
-                     | EnvSpan
-                     | Answer
-                     | Choice
                      | MultipleChoice
                      | Abstract
-                     | IncludeGraphics
                      | TikzPicture
-                     | ActivityTitle
-                     | ShortDescription
+
+data ActionType = Answer
+                | EnvSpan
+                | Choice
+                | IncludeGraphics
+                | ActivityTitle
+                | ShortDescription
 
 -- Type, classes, attributes
 environmentMappings :: Map.Map T.Text (EnvironmentType, [String], [(String,String)])
@@ -45,23 +48,25 @@ environmentMappings = Map.fromList [
     ("exploration", (EnvDiv, ["exploration"], [("ximera-exploration", ""), ("shuffleStatus", "shuffleStatus")])),
     ("solution", (EnvDiv, ["solution"], [("ximera-solution", "")])),
     ("abstract", (Abstract, [], [])),
-    ("answer", (Answer, ["answer"], [("ximera-answer", "")])),
-    ("youtube", (EnvDiv, ["youtube"], [("ximera-youtube", "")])),
-    ("answer", (Answer, ["answer"], [("ximera-answer", "ximera-answer")])),
-    ("choice", (Choice, ["choice"], [("ximera-choice", "")])),
     ("multiple-choice", (MultipleChoice, ["multiple-choice"], [("ximera-multiple-choice", "")])),
-    ("includegraphics", (IncludeGraphics, [], [])),
     ("tikzpicture", (TikzPicture, [], [])),
+    ("hint", (EnvDiv, ["hint"], [("ximera-hint", "")]))]
+
+actionMappings :: Map.Map T.Text (ActionType, [String], [(String,String)])
+actionMappings = Map.fromList [
+    ("answer", (Answer, ["answer"], [("ximera-answer", "")])),
+    ("choice", (Choice, ["choice"], [("ximera-choice", "")])),
     ("activitytitle", (ActivityTitle, [], [])),
     ("shortdescription", (ShortDescription, [], [])),
-    ("hint", (EnvDiv, ["hint"], [("ximera-hint", "")]))]
+    ("includegraphics", (IncludeGraphics, [], [])),
+    ("youtube", (EnvSpan, ["youtube"], [("ximera-youtube", "")]))]
 
 environments :: [T.Text]
 environments = Map.keys environmentMappings
 
--- List of environments coming from inline commands; require parsing of arguments.
-inlineEnvironments :: [T.Text]
-inlineEnvironments = ["choice", "answer", "includegraphics", "activitytitle", "shortdescription"]
+actions :: [T.Text]
+actions = Map.keys actionMappings
+
 
 -- | The template to use for tikzpictures from the filter, loaded from tikz-template.tex
 tikzTemplate :: IO Template
@@ -182,99 +187,119 @@ writeLogToMongo meta log =
 
 
 stripDollars :: String -> String
-stripDollars = (takeWhile (not .(== '$'))) . (dropWhile (== '$'))
+stripDollars = takeWhile (not .(== '$')) . dropWhile (== '$')
 
--- | Turn latex RawBlocks for the given environment into Divs with that environment as their class.
--- Normally, these blocks are ignored by HTML writer. -}
+-- Returns ([optional args], [required args])
+parseTeXArgs :: [TeXArg] -> ([T.Text], [T.Text])
+parseTeXArgs args = parseTeXArgs' args [] []
+  where
+    parseTeXArgs' [] opt req = (opt, req)
+    parseTeXArgs' (x:xs) opt req =
+      let
+        (newOpt, newReq) = case x of
+          FixArg y -> (opt, req ++ [T.pack $ show y])
+          OptArg y -> (opt ++ [T.pack $ show y], req)
+          MOptArg ys -> (opt ++ map (T.pack . show) ys, req)
+          otherwise -> (opt, req)
+      in
+        parseTeXArgs' xs newOpt newReq
+
+actionFilter :: T.Text -> Map.Map String MetaValue -> Block -> IO Block
+actionFilter a meta b@(Para inlines) = do
+  mappedInlines <- (mapM (actionFilter' a meta) inlines)
+  return $ Para mappedInlines
+actionFilter _ _ b = return b
+
+actionFilter' :: T.Text -> Map.Map String MetaValue -> Inline -> IO Inline
+actionFilter' a meta i@(RawInline (Format "latex") s) =
+  case (parseLaTeX (T.pack s)) of
+    Left errorString -> return i
+    Right (TeXComm name args) -> inlineCommand name (parseTeXArgs args)
+    Right (TeXCommS name) -> inlineCommand name ([], [])
+  where
+    inlineCommand :: String -> ([T.Text], [T.Text]) -> IO Inline
+    inlineCommand name (optionalParameters, requiredParameters) =
+      let
+        (inlineType, baseClasses, baseAttributes) = fromMaybe (error "This shouldn't happen: couldn't find environment in environmentMappings.") (Map.lookup a actionMappings)
+        content = case requiredParameters of
+          (x:xs) -> T.unpack x
+          [] -> ""
+      in do
+        randId <- nextRandom
+        let attributes = ("data-uuid", toString randId) : baseAttributes
+        let classes = baseClasses
+        case inlineType of
+          EnvSpan -> do
+            blocks <- parseRawBlock content meta
+            let inline = extractTopInline blocks
+            return $ Span ("", classes, attributes) [inline]
+          Answer -> return $ Span ("", classes, attributes ++ [("data-answer", stripDollars content)]) []
+          ShortDescription -> do
+            writeDescriptionToMongo meta content
+            return $ Str ""
+          ActivityTitle -> do
+            writeTitleToMongo meta content
+            return $ Str ""
+          Choice -> do
+            -- TODO: Put correct/incorrect into this div from second argument.
+            let value = case optionalParameters of
+                  v:_ -> T.unpack v
+                  _ -> ""
+            return $ Span ("",classes, attributes ++ [("data-value",value)]) [Str content]
+          IncludeGraphics -> do
+            let filename = content
+                dotIndex = fromMaybe (error "No file extension for image") $ elemIndex '.' (reverse filename)
+                extension = drop (length content - dotIndex) filename
+            let imageMimeType = case extension of
+                  "png" -> "image/png"
+                  "jpg" -> "image/jpeg"
+                  "jpeg"-> "image/jpeg"
+                  "pdf" -> "image/png"
+                  _ -> error ("Unknown image type for " ++ extension)
+            -- TODO: Sandbox so this can only read files from the current directory?
+            h <- case extension of
+              "pdf" -> do
+                pdfContent <- compilePdfToPng $ T.pack filename
+                addImageToMongo meta (T.pack imageMimeType) pdfContent
+              _ -> do
+                imageContent <- B.readFile content
+                addImageToMongo meta (T.pack imageMimeType) imageContent
+            return $ Image [] ("/image/" ++ show h, "Included Graphic")
+actionFilter' _ _ i = return i
+
+
+
 environmentFilter :: T.Text -> Map.Map String MetaValue -> Block -> IO Block
 environmentFilter e meta b@(RawBlock (Format "latex") s) =
-  let sLen = length s
-      eLen = T.length e
-  in if T.concat ["\\begin{", e, "}"] `T.isPrefixOf` T.pack s then
-       let rawContent = drop (eLen + 8) $ take (sLen - (eLen + 6)) s
-           isInline = elem e inlineEnvironments
-           optionalParameters = parseOptionalParameters rawContent
-           requiredParameters = if isInline then parseInlineRequiredParameters rawContent else [rawContent]
-           -- Convenience variable for environments not using required parameters.
-           content = head requiredParameters
-           (envType, baseClasses, baseAttributes) = fromMaybe (error "This shouldn't happen: couldn't find environment in environmentMappings.") (Map.lookup e environmentMappings)
-       in do
+  case (parseLaTeX (T.pack s)) of
+    Left errorString -> return b
+    Right (TeXEnv name args latexContent) ->
+      if (T.pack name) == e then
+        let
+          (optionalParameters, requiredParameters) = parseTeXArgs args
+          (envType, baseClasses, baseAttributes) = fromMaybe (error "This shouldn't happen: couldn't find environment in environmentMappings.") (Map.lookup e environmentMappings)
+          content = show latexContent
+        in do
          randId <- nextRandom
          let attributes = ("data-uuid", toString randId) : baseAttributes
          let classes = baseClasses
          case envType of
-           EnvDiv -> do
-             blocks <- parseRawBlock content meta
-             return $ Div ("", classes, attributes) blocks
-           EnvSpan -> return $ Plain [Span ("", classes, attributes) [Str content]]
-           Answer -> return $ Plain [Span ("", classes, attributes ++ [("data-answer", stripDollars content)]) []]
-           Abstract -> do
-             writeDescriptionToMongo meta content
-             return $ Plain []
-           ShortDescription -> do
-             writeDescriptionToMongo meta content
-             return $ Plain []
-           ActivityTitle -> do
-             writeTitleToMongo meta content
-             return $ Plain []
-           MultipleChoice -> do
-             blocks <- parseRawBlock content meta
-             return $ Div ("", classes, attributes ++ [("data-answer", "correct")]) blocks
-           Choice -> do
-             -- TODO: Put correct/incorrect into this div from second argument.
-             let value = case optionalParameters of
-                   v:_ -> v
-                   _ -> ""
-             return $ Div ("",classes, attributes ++ [("data-value",value)]) [Plain [Str content]]
-           TikzPicture -> do
-             pngContent <- tikzpictureToPng (T.pack content)
-             -- Add file contents to MongoDB
-             h <- addImageToMongo meta "image/png" pngContent
-             return $ Plain [Image [] ("/image/" ++ show h, "Tikz Picture")]
-           IncludeGraphics -> do
-             let filename = content
-                 dotIndex = fromMaybe (error "No file extension for image") $ elemIndex '.' (reverse filename)
-                 extension = drop (length content - dotIndex) filename
-             let imageMimeType = case extension of
-                   "png" -> "image/png"
-                   "jpg" -> "image/jpeg"
-                   "jpeg"-> "image/jpeg"
-                   "pdf" -> "image/png"
-                   _ -> error ("Unknown image type for " ++ extension)
-             -- TODO: Sandbox so this can only read files from the current directory?
-             h <- case extension of
-               "pdf" -> do
-                 pdfContent <- compilePdfToPng $ T.pack filename
-                 addImageToMongo meta (T.pack imageMimeType) pdfContent
-               _ -> do
-                 imageContent <- B.readFile content
-                 addImageToMongo meta (T.pack imageMimeType) imageContent
-             return $ Plain [Image [] ("/image/" ++ show h, "Included Graphic")]
+            EnvDiv -> do
+              blocks <- parseRawBlock content meta
+              return $ Div ("", classes, attributes) blocks
+            Abstract -> do
+              writeDescriptionToMongo meta content
+              return $ Plain []
+            MultipleChoice -> do
+              blocks <- parseRawBlock content meta
+              return $ Div ("", classes, attributes ++ [("data-answer", "correct")]) blocks
+            TikzPicture -> do
+              pngContent <- tikzpictureToPng (T.pack content)
+              -- Add file contents to MongoDB
+              h <- addImageToMongo meta "image/png" pngContent
+              return $ Plain [Image [] ("/image/" ++ show h, "Tikz Picture")]
      else return b
 environmentFilter _ _ b = return b
-
--- Helper methods; type checking doesn't want to work without this...
--- Gives list of [match, matchGroup1, matchGroup2, ...]
-pat :: String -> String -> [[String]]
-pat pattern str = str =~ pattern
-
---Gives tuple of (beforeMatch, match, afterMatch)
-patTuple :: String -> String -> (String, String, String)
-patTuple pattern str = str =~ pattern
-
--- Example: "{asdf}{qwer}" -> ["asdf", "qwer"]
-
-
-parseInlineRequiredParameters :: String -> [String]
-parseInlineRequiredParameters content = map (!! 1) (pat "{([^}]*)}" content)
-
-optionalParameterPattern = "^\\[([^\\]]*)\\]"
-
-parseOptionalParameters :: String -> [String]
-parseOptionalParameters content = map (!! 1) (pat optionalParameterPattern content)
-
-removeOptionalParameters :: String -> String
-removeOptionalParameters (patTuple optionalParameterPattern -> (_, _, remainder)) = remainder
 
 parseRawBlock :: String -> Map.Map String MetaValue -> IO [Block]
 parseRawBlock content meta =
@@ -286,9 +311,25 @@ parseRawBlock content meta =
 environmentFilters :: [Map.Map String MetaValue -> Block -> IO Block]
 environmentFilters = map environmentFilter environments
 
+actionFilters :: [Map.Map String MetaValue -> Block -> IO Block]
+actionFilters = map actionFilter actions
+
 substituteRawBlocks :: Map.Map String MetaValue -> Block -> IO Block
 substituteRawBlocks m x =
-    foldM (flip ($)) x (map ($ m) environmentFilters)
+    foldM (flip ($)) x ((map ($ m) environmentFilters) ++ (map ($ m) actionFilters))
+
+extractTopInline :: [Block] -> Inline
+extractTopInline (x:xs) = case extractTopInline' x of
+  Just i -> i
+  Nothing -> extractTopInline xs
+  where
+    extractTopInline' x = case x of
+      Plain (y:ys) -> Just y
+      Para (y:ys) -> Just y
+      Header _ _ (y:ys) -> Just y
+      Div _ ys -> Just (extractTopInline ys)
+      _ -> Nothing
+extractTopInline [] = Str ""
 
 findRepoId :: Map.Map String MetaValue -> T.Text
 findRepoId m =
@@ -320,12 +361,12 @@ toJSONFilterMeta f =
 
 mergeAdjacent :: [Block] -> [Block]
 mergeAdjacent (a@(Para i) : b@(Plain [s@(Span (_, classes, _) _)]) : xs) =
-    if not (null (map T.pack classes `intersect` inlineEnvironments)) then
+    if not (null (map T.pack classes `intersect` actions)) then
       Para (i ++ [s]):xs
     else
       a:mergeAdjacent (b:xs)
 mergeAdjacent (a@(Plain [s@(Span (_, classes, _) _)]):b@(Para i):xs) =
-    if not (null (map T.pack classes `intersect` inlineEnvironments)) then
+    if not (null (map T.pack classes `intersect` actions)) then
       Para (s:i):xs
     else
       a:mergeAdjacent (b:xs)
