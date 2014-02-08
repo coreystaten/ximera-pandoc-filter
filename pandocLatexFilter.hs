@@ -25,6 +25,7 @@ import Data.UUID (toString)
 import Data.UUID.V4 (nextRandom)
 import Text.Regex.PCRE
 import Text.LaTeX.Base.Parser
+import Text.LaTeX.Base.Render
 import Text.LaTeX.Base.Syntax
 
 data EnvironmentType = EnvDiv
@@ -197,74 +198,85 @@ parseTeXArgs args = parseTeXArgs' args [] []
     parseTeXArgs' (x:xs) opt req =
       let
         (newOpt, newReq) = case x of
-          FixArg y -> (opt, req ++ [T.pack $ show y])
-          OptArg y -> (opt ++ [T.pack $ show y], req)
-          MOptArg ys -> (opt ++ map (T.pack . show) ys, req)
+          FixArg y -> (opt, req ++ [render y])
+          OptArg y -> (opt ++ [render y], req)
+          MOptArg ys -> (opt ++ map render ys, req)
           otherwise -> (opt, req)
       in
         parseTeXArgs' xs newOpt newReq
 
+imageFilter :: Map.Map String MetaValue -> Block -> IO Block
+imageFilter meta (Para inlines) = do
+  mappedInlines <- mapM (imageFilter' meta) inlines
+  return $ Para mappedInlines
+imageFilter _ b = return b
+
+imageFilter' :: Map.Map String MetaValue -> Inline -> IO Inline
+imageFilter' meta i@(Image _ (filename, _)) =
+  let dotIndex = fromMaybe (error "No file extension for image") $ elemIndex '.' (reverse filename)
+      extension = drop (length filename - dotIndex) filename
+      imageMimeType = case extension of
+        "png" -> "image/png"
+        "jpg" -> "image/jpeg"
+        "jpeg"-> "image/jpeg"
+        "pdf" -> "image/png"
+        _ -> error ("Unknown image type for " ++ extension)
+  in do
+    -- TODO: Sandbox so this can only read files from the current directory?
+    h <- case extension of
+      "pdf" -> do
+        pdfContent <- compilePdfToPng $ T.pack filename
+        addImageToMongo meta (T.pack imageMimeType) pdfContent
+      _ -> do
+        imageContent <- B.readFile filename
+        addImageToMongo meta (T.pack imageMimeType) imageContent
+    return $ Image [] ("/image/" ++ show h, "Included Graphic")
+imageFilter' _ i = return i
+
 actionFilter :: T.Text -> Map.Map String MetaValue -> Block -> IO Block
-actionFilter a meta b@(Para inlines) = do
+actionFilter a meta (Para inlines) = do
   mappedInlines <- (mapM (actionFilter' a meta) inlines)
   return $ Para mappedInlines
 actionFilter _ _ b = return b
 
 actionFilter' :: T.Text -> Map.Map String MetaValue -> Inline -> IO Inline
 actionFilter' a meta i@(RawInline (Format "latex") s) =
-  case (parseLaTeX (T.pack s)) of
+  case parseLaTeX (T.pack s) of
     Left errorString -> return i
     Right (TeXComm name args) -> inlineCommand name (parseTeXArgs args)
     Right (TeXCommS name) -> inlineCommand name ([], [])
   where
     inlineCommand :: String -> ([T.Text], [T.Text]) -> IO Inline
     inlineCommand name (optionalParameters, requiredParameters) =
-      let
-        (inlineType, baseClasses, baseAttributes) = fromMaybe (error "This shouldn't happen: couldn't find environment in environmentMappings.") (Map.lookup a actionMappings)
-        content = case requiredParameters of
-          (x:xs) -> T.unpack x
-          [] -> ""
-      in do
-        randId <- nextRandom
-        let attributes = ("data-uuid", toString randId) : baseAttributes
-        let classes = baseClasses
-        case inlineType of
-          EnvSpan -> do
-            blocks <- parseRawBlock content meta
-            let inline = extractTopInline blocks
-            return $ Span ("", classes, attributes) [inline]
-          Answer -> return $ Span ("", classes, attributes ++ [("data-answer", stripDollars content)]) []
-          ShortDescription -> do
-            writeDescriptionToMongo meta content
-            return $ Str ""
-          ActivityTitle -> do
-            writeTitleToMongo meta content
-            return $ Str ""
-          Choice -> do
-            -- TODO: Put correct/incorrect into this div from second argument.
-            let value = case optionalParameters of
-                  v:_ -> T.unpack v
-                  _ -> ""
-            return $ Span ("",classes, attributes ++ [("data-value",value)]) [Str content]
-          IncludeGraphics -> do
-            let filename = content
-                dotIndex = fromMaybe (error "No file extension for image") $ elemIndex '.' (reverse filename)
-                extension = drop (length content - dotIndex) filename
-            let imageMimeType = case extension of
-                  "png" -> "image/png"
-                  "jpg" -> "image/jpeg"
-                  "jpeg"-> "image/jpeg"
-                  "pdf" -> "image/png"
-                  _ -> error ("Unknown image type for " ++ extension)
-            -- TODO: Sandbox so this can only read files from the current directory?
-            h <- case extension of
-              "pdf" -> do
-                pdfContent <- compilePdfToPng $ T.pack filename
-                addImageToMongo meta (T.pack imageMimeType) pdfContent
-              _ -> do
-                imageContent <- B.readFile content
-                addImageToMongo meta (T.pack imageMimeType) imageContent
-            return $ Image [] ("/image/" ++ show h, "Included Graphic")
+      if T.pack name == a then
+         let
+           (inlineType, baseClasses, baseAttributes) = fromMaybe (error "This shouldn't happen: couldn't find environment in environmentMappings.") (Map.lookup a actionMappings)
+           content = case requiredParameters of
+             (x:xs) -> T.unpack x
+             [] -> ""
+         in do
+           randId <- nextRandom
+           let attributes = ("data-uuid", toString randId) : baseAttributes
+           let classes = baseClasses
+           case inlineType of
+             EnvSpan -> do
+               blocks <- parseRawBlock content meta
+               let inline = extractTopInline blocks
+               return $ Span ("", classes, attributes) [inline]
+             Answer -> return $ Span ("", classes, attributes ++ [("data-answer", stripDollars content)]) []
+             ShortDescription -> do
+               writeDescriptionToMongo meta content
+               return $ Str ""
+             ActivityTitle -> do
+               writeTitleToMongo meta content
+               return $ Str ""
+             Choice -> do
+               -- TODO: Put correct/incorrect into this div from second argument.
+               let value = case optionalParameters of
+                     v:_ -> T.unpack v
+                     _ -> ""
+               return $ Span ("",classes, attributes ++ [("data-value",value)]) [Str content]
+      else return i
 actionFilter' _ _ i = return i
 
 
@@ -278,7 +290,7 @@ environmentFilter e meta b@(RawBlock (Format "latex") s) =
         let
           (optionalParameters, requiredParameters) = parseTeXArgs args
           (envType, baseClasses, baseAttributes) = fromMaybe (error "This shouldn't happen: couldn't find environment in environmentMappings.") (Map.lookup e environmentMappings)
-          content = show latexContent
+          content = T.unpack . render $ latexContent
         in do
          randId <- nextRandom
          let attributes = ("data-uuid", toString randId) : baseAttributes
@@ -316,7 +328,7 @@ actionFilters = map actionFilter actions
 
 substituteRawBlocks :: Map.Map String MetaValue -> Block -> IO Block
 substituteRawBlocks m x =
-    foldM (flip ($)) x ((map ($ m) environmentFilters) ++ (map ($ m) actionFilters))
+    foldM (flip ($)) x (map ($ m) environmentFilters ++ map ($ m) actionFilters ++ [imageFilter m])
 
 extractTopInline :: [Block] -> Inline
 extractTopInline (x:xs) = case extractTopInline' x of
@@ -350,7 +362,6 @@ toJSONFilterMeta f =
         let doc = either error id . eitherDecode' $ jsonContents
         let meta = case doc of
                        Pandoc m _ -> unMeta m
-        writeLogToMongo meta (show meta) -- TODO: Remove
         writeMetaTitleToMongo meta
         processedDoc <- (walkM (f meta) :: Pandoc -> IO Pandoc) doc
         -- Merge inline commands with adjacent paragraphs
