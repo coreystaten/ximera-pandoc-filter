@@ -29,12 +29,14 @@ import Text.LaTeX.Base.Render
 import Text.LaTeX.Base.Syntax
 
 data EnvironmentType = EnvDiv
+                     | EnvDivNoContent
                      | MultipleChoice
                      | Abstract
                      | TikzPicture
 
 data ActionType = Answer
                 | EnvSpan
+                | EnvSpanNoContent
                 | Choice
                 | IncludeGraphics
                 | ActivityTitle
@@ -44,9 +46,9 @@ data ActionType = Answer
 environmentMappings :: Map.Map T.Text (EnvironmentType, [String], [(String,String)])
 environmentMappings = Map.fromList [
     ("shuffle", (EnvDiv, ["shuffle"], [("ximera-shuffle", "")])),
-    ("question", (EnvDiv, ["question"], [("ximera-question", ""), ("shuffleStatus", "shuffleStatus")])),
-    ("exercise", (EnvDiv, ["exercise"], [("ximera-exercise", ""), ("shuffleStatus", "shuffleStatus")])),
-    ("exploration", (EnvDiv, ["exploration"], [("ximera-exploration", ""), ("shuffleStatus", "shuffleStatus")])),
+    ("question", (EnvDiv, ["question"], [("ximera-question", "")])),
+    ("exercise", (EnvDiv, ["exercise"], [("ximera-exercise", "")])),
+    ("exploration", (EnvDiv, ["exploration"], [("ximera-exploration", "")])),
     ("solution", (EnvDiv, ["solution"], [("ximera-solution", "")])),
     ("abstract", (Abstract, [], [])),
     ("multiple-choice", (MultipleChoice, ["multiple-choice"], [("ximera-multiple-choice", "")])),
@@ -233,85 +235,82 @@ imageFilter' meta i@(Image _ (filename, _)) =
     return $ Image [] ("/image/" ++ show h, "Included Graphic")
 imageFilter' _ i = return i
 
-actionFilter :: T.Text -> Map.Map String MetaValue -> Block -> IO Block
-actionFilter a meta (Para inlines) = do
-  mappedInlines <- (mapM (actionFilter' a meta) inlines)
+actionFilter :: Map.Map String MetaValue -> Block -> IO Block
+actionFilter meta (Para inlines) = do
+  mappedInlines <- (mapM (actionFilter' meta) inlines)
   return $ Para mappedInlines
-actionFilter _ _ b = return b
+actionFilter _ b = return b
 
-actionFilter' :: T.Text -> Map.Map String MetaValue -> Inline -> IO Inline
-actionFilter' a meta i@(RawInline (Format "latex") s) =
+actionFilter' :: Map.Map String MetaValue -> Inline -> IO Inline
+actionFilter' meta i@(RawInline (Format "latex") s) =
   case parseLaTeX (T.pack s) of
     Left errorString -> return i
-    Right (TeXComm name args) -> inlineCommand name (parseTeXArgs args)
-    Right (TeXCommS name) -> inlineCommand name ([], [])
+    Right (TeXComm name args) -> inlineCommand (T.pack name) (parseTeXArgs args)
+    Right (TeXCommS name) -> inlineCommand (T.pack name) ([], [])
   where
-    inlineCommand :: String -> ([T.Text], [T.Text]) -> IO Inline
+    inlineCommand :: T.Text -> ([T.Text], [T.Text]) -> IO Inline
     inlineCommand name (optionalParameters, requiredParameters) =
-      if T.pack name == a then
-         let
-           (inlineType, baseClasses, baseAttributes) = fromMaybe (error "This shouldn't happen: couldn't find environment in environmentMappings.") (Map.lookup a actionMappings)
-           content = case requiredParameters of
-             (x:xs) -> T.unpack x
-             [] -> ""
-         in do
-           randId <- nextRandom
-           let attributes = ("data-uuid", toString randId) : baseAttributes
-           let classes = baseClasses
-           case inlineType of
-             EnvSpan -> do
-               blocks <- parseRawBlock content meta
-               let inline = extractTopInline blocks
-               return $ Span ("", classes, attributes) [inline]
-             Answer -> return $ Span ("", classes, attributes ++ [("data-answer", stripDollars content)]) []
-             ShortDescription -> do
-               writeDescriptionToMongo meta content
-               return $ Str ""
-             ActivityTitle -> do
-               writeTitleToMongo meta content
-               return $ Str ""
-             Choice -> do
-               -- TODO: Put correct/incorrect into this div from second argument.
-               let value = case optionalParameters of
-                     v:_ -> T.unpack v
-                     _ -> ""
-               return $ Span ("",classes, attributes ++ [("data-value",value)]) [Str content]
-      else return i
-actionFilter' _ _ i = return i
+      let
+        (inlineType, baseClasses, baseAttributes) = fromMaybe (EnvSpanNoContent, [T.unpack name], [("ximera-" ++ T.unpack name, "")]) (Map.lookup name actionMappings)
+        content = case requiredParameters of
+          (x:xs) -> T.unpack x
+          [] -> ""
+      in do
+        randId <- nextRandom
+        let attributes = ("data-uuid", toString randId) : baseAttributes
+        let classes = baseClasses
+        case inlineType of
+          EnvSpanNoContent -> return $ Span ("", classes, attributes) []
+          EnvSpan -> do
+            blocks <- parseRawBlock content meta
+            let inline = extractTopInline blocks
+            return $ Span ("", classes, attributes) [inline]
+          Answer -> return $ Span ("", classes, attributes ++ [("data-answer", stripDollars content)]) []
+          ShortDescription -> do
+            writeDescriptionToMongo meta content
+            return $ Str ""
+          ActivityTitle -> do
+            writeTitleToMongo meta content
+            return $ Str ""
+          Choice -> do
+            -- TODO: Put correct/incorrect into this div from second argument.
+            let value = case optionalParameters of
+                  v:_ -> T.unpack v
+                  _ -> ""
+            return $ Span ("",classes, attributes ++ [("data-value",value)]) [Str content]
+actionFilter' _ i = return i
 
-
-
-environmentFilter :: T.Text -> Map.Map String MetaValue -> Block -> IO Block
-environmentFilter e meta b@(RawBlock (Format "latex") s) =
-  case (parseLaTeX (T.pack s)) of
+environmentFilter :: Map.Map String MetaValue -> Block -> IO Block
+environmentFilter meta b@(RawBlock (Format "latex") s) =
+  case parseLaTeX (T.pack s) of
     Left errorString -> return b
     Right (TeXEnv name args latexContent) ->
-      if (T.pack name) == e then
-        let
-          (optionalParameters, requiredParameters) = parseTeXArgs args
-          (envType, baseClasses, baseAttributes) = fromMaybe (error "This shouldn't happen: couldn't find environment in environmentMappings.") (Map.lookup e environmentMappings)
-          content = T.unpack . render $ latexContent
-        in do
-         randId <- nextRandom
-         let attributes = ("data-uuid", toString randId) : baseAttributes
-         let classes = baseClasses
-         case envType of
-            EnvDiv -> do
-              blocks <- parseRawBlock content meta
-              return $ Div ("", classes, attributes) blocks
-            Abstract -> do
-              writeDescriptionToMongo meta content
-              return $ Plain []
-            MultipleChoice -> do
-              blocks <- parseRawBlock content meta
-              return $ Div ("", classes, attributes ++ [("data-answer", "correct")]) blocks
-            TikzPicture -> do
-              pngContent <- tikzpictureToPng (T.pack content)
-              -- Add file contents to MongoDB
-              h <- addImageToMongo meta "image/png" pngContent
-              return $ Plain [Image [] ("/image/" ++ show h, "Tikz Picture")]
-     else return b
-environmentFilter _ _ b = return b
+      let
+        tName = T.pack name
+        (optionalParameters, requiredParameters) = parseTeXArgs args
+        (envType, baseClasses, baseAttributes) = fromMaybe (EnvDivNoContent, [name], [("ximera-" ++ name, "")]) (Map.lookup tName environmentMappings)
+        content = T.unpack . render $ latexContent
+      in do
+        randId <- nextRandom
+        let attributes = ("data-uuid", toString randId) : baseAttributes
+        let classes = baseClasses
+        case envType of
+          EnvDivNoContent -> return $ Div ("", classes, attributes) []
+          EnvDiv -> do
+            blocks <- parseRawBlock content meta
+            return $ Div ("", classes, attributes) blocks
+          Abstract -> do
+            writeDescriptionToMongo meta content
+            return $ Plain []
+          MultipleChoice -> do
+            blocks <- parseRawBlock content meta
+            return $ Div ("", classes, attributes ++ [("data-answer", "correct")]) blocks
+          TikzPicture -> do
+            pngContent <- tikzpictureToPng (T.pack content)
+            -- Add file contents to MongoDB
+            h <- addImageToMongo meta "image/png" pngContent
+            return $ Plain [Image [] ("/image/" ++ show h, "Tikz Picture")]
+environmentFilter _ b = return b
 
 parseRawBlock :: String -> Map.Map String MetaValue -> IO [Block]
 parseRawBlock content meta =
@@ -320,15 +319,9 @@ parseRawBlock content meta =
     in
         mapM (substituteRawBlocks meta) blocks
 
-environmentFilters :: [Map.Map String MetaValue -> Block -> IO Block]
-environmentFilters = map environmentFilter environments
-
-actionFilters :: [Map.Map String MetaValue -> Block -> IO Block]
-actionFilters = map actionFilter actions
-
 substituteRawBlocks :: Map.Map String MetaValue -> Block -> IO Block
 substituteRawBlocks m x =
-    foldM (flip ($)) x (map ($ m) environmentFilters ++ map ($ m) actionFilters ++ [imageFilter m])
+    foldM (flip ($)) x [environmentFilter m, actionFilter m, imageFilter m]
 
 extractTopInline :: [Block] -> Inline
 extractTopInline (x:xs) = case extractTopInline' x of
