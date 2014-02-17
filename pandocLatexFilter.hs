@@ -310,6 +310,7 @@ environmentFilter meta b@(RawBlock (Format "latex") s) =
             -- Add file contents to MongoDB
             h <- addImageToMongo meta "image/png" pngContent
             return $ Plain [Image [] ("/image/" ++ show h, "Tikz Picture")]
+    _ -> return b
 environmentFilter _ b = return b
 
 parseRawBlock :: String -> Map.Map String MetaValue -> IO [Block]
