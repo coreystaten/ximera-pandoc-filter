@@ -30,6 +30,7 @@ import Text.LaTeX.Base.Syntax
 
 data EnvironmentType = EnvDiv
                      | EnvDivNoContent
+                     | CodeDiv
                      | MultipleChoice
                      | Abstract
                      | TikzPicture
@@ -37,6 +38,7 @@ data EnvironmentType = EnvDiv
 data ActionType = Answer
                 | EnvSpan
                 | EnvSpanNoContent
+                | CodeSpan
                 | Choice
                 | IncludeGraphics
                 | ActivityTitle
@@ -45,15 +47,12 @@ data ActionType = Answer
 -- Type, classes, attributes
 environmentMappings :: Map.Map T.Text (EnvironmentType, [String], [(String,String)])
 environmentMappings = Map.fromList [
-    ("shuffle", (EnvDiv, ["shuffle"], [("ximera-shuffle", "")])),
-    ("question", (EnvDiv, ["question"], [("ximera-question", "")])),
-    ("exercise", (EnvDiv, ["exercise"], [("ximera-exercise", "")])),
-    ("exploration", (EnvDiv, ["exploration"], [("ximera-exploration", "")])),
-    ("solution", (EnvDiv, ["solution"], [("ximera-solution", "")])),
     ("abstract", (Abstract, [], [])),
     ("multiple-choice", (MultipleChoice, ["multiple-choice"], [("ximera-multiple-choice", "")])),
     ("tikzpicture", (TikzPicture, [], [])),
-    ("hint", (EnvDiv, ["hint"], [("ximera-hint", "")]))]
+    ("python-scaffold", (CodeDiv, ["python-scaffold"], [("ximera-python-scaffold", "")])),
+    ("python-validator", (CodeDiv, ["python-validator"], [("ximera-python-validator", "")]))
+    ]
 
 actionMappings :: Map.Map T.Text (ActionType, [String], [(String,String)])
 actionMappings = Map.fromList [
@@ -62,7 +61,8 @@ actionMappings = Map.fromList [
     ("activitytitle", (ActivityTitle, [], [])),
     ("shortdescription", (ShortDescription, [], [])),
     ("includegraphics", (IncludeGraphics, [], [])),
-    ("youtube", (EnvSpan, ["youtube"], [("ximera-youtube", "")]))]
+    ("youtube", (EnvSpan, ["youtube"], [("ximera-youtube", "")])),
+    ("vecanswer", (CodeSpan, ["vecanswer"], [("ximera-vecanswer", "")]))]
 
 environments :: [T.Text]
 environments = Map.keys environmentMappings
@@ -235,11 +235,13 @@ imageFilter' meta i@(Image _ (filename, _)) =
     return $ Image [] ("/image/" ++ show h, "Included Graphic")
 imageFilter' _ i = return i
 
-actionFilter :: Map.Map String MetaValue -> Block -> IO Block
-actionFilter meta (Para inlines) = do
-  mappedInlines <- (mapM (actionFilter' meta) inlines)
+mapInlineFilter :: (Map.Map String MetaValue -> Inline -> IO Inline) -> Map.Map String MetaValue -> Block -> IO Block
+mapInlineFilter f meta (Para inlines) = do
+  mappedInlines <- mapM (f meta) inlines
   return $ Para mappedInlines
-actionFilter _ b = return b
+mapInlineFilter _ _ b = return b
+
+actionFilter  = mapInlineFilter actionFilter'
 
 actionFilter' :: Map.Map String MetaValue -> Inline -> IO Inline
 actionFilter' meta i@(RawInline (Format "latex") s) =
@@ -251,7 +253,7 @@ actionFilter' meta i@(RawInline (Format "latex") s) =
     inlineCommand :: T.Text -> ([T.Text], [T.Text]) -> IO Inline
     inlineCommand name (optionalParameters, requiredParameters) =
       let
-        (inlineType, baseClasses, baseAttributes) = fromMaybe (EnvSpanNoContent, [T.unpack name], [("ximera-" ++ T.unpack name, "")]) (Map.lookup name actionMappings)
+        (inlineType, baseClasses, baseAttributes) = fromMaybe (EnvSpan, [T.unpack name], [("ximera-" ++ T.unpack name, "")]) (Map.lookup name actionMappings)
         content = case requiredParameters of
           (x:xs) -> T.unpack x
           [] -> ""
@@ -265,6 +267,9 @@ actionFilter' meta i@(RawInline (Format "latex") s) =
             blocks <- parseRawBlock content meta
             let inline = extractTopInline blocks
             return $ Span ("", classes, attributes) [inline]
+          CodeSpan -> do
+            let cdata = "<![CDATA[" ++ content ++  "]]>"
+            return $ Span ("", classes, attributes) [Str cdata]
           Answer -> return $ Span ("", classes, attributes ++ [("data-answer", stripDollars content)]) []
           ShortDescription -> do
             writeDescriptionToMongo meta content
@@ -288,7 +293,7 @@ environmentFilter meta b@(RawBlock (Format "latex") s) =
       let
         tName = T.pack name
         (optionalParameters, requiredParameters) = parseTeXArgs args
-        (envType, baseClasses, baseAttributes) = fromMaybe (EnvDivNoContent, [name], [("ximera-" ++ name, "")]) (Map.lookup tName environmentMappings)
+        (envType, baseClasses, baseAttributes) = fromMaybe (EnvDiv, [name], [("ximera-" ++ name, "")]) (Map.lookup tName environmentMappings)
         content = T.unpack . render $ latexContent
       in do
         randId <- nextRandom
@@ -296,6 +301,9 @@ environmentFilter meta b@(RawBlock (Format "latex") s) =
         let classes = baseClasses
         case envType of
           EnvDivNoContent -> return $ Div ("", classes, attributes) []
+          CodeDiv -> do
+            let cdata = "<![CDATA[" ++ content ++ "]]>"
+            return $ Div ("", classes, attributes) [RawBlock (Format "html") cdata]
           EnvDiv -> do
             blocks <- parseRawBlock content meta
             return $ Div ("", classes, attributes) blocks
@@ -313,6 +321,13 @@ environmentFilter meta b@(RawBlock (Format "latex") s) =
     _ -> return b
 environmentFilter _ b = return b
 
+mathFilter = mapInlineFilter mathFilter'
+
+mathFilter' :: Map.Map String MetaValue -> Inline -> IO Inline
+mathFilter' _ (Math DisplayMath c) = return $ RawInline (Format "html") $ "<script type='math/tex'>" ++ c ++ "</script>"
+mathFilter' _ (Math InlineMath c) = return $ RawInline (Format "html") $ "<script type='math/tex'>" ++ c ++ "</script>"
+mathFilter' _ i = return i
+
 parseRawBlock :: String -> Map.Map String MetaValue -> IO [Block]
 parseRawBlock content meta =
     let
@@ -322,7 +337,7 @@ parseRawBlock content meta =
 
 substituteRawBlocks :: Map.Map String MetaValue -> Block -> IO Block
 substituteRawBlocks m x =
-    foldM (flip ($)) x [environmentFilter m, actionFilter m, imageFilter m]
+    foldM (flip ($)) x [environmentFilter m, actionFilter m, imageFilter m, mathFilter m]
 
 extractTopInline :: [Block] -> Inline
 extractTopInline (x:xs) = case extractTopInline' x of
