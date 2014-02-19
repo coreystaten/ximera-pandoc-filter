@@ -259,7 +259,9 @@ actionFilter' meta i@(RawInline (Format "latex") s) =
           [] -> ""
       in do
         randId <- nextRandom
-        let attributes = ("data-uuid", toString randId) : baseAttributes
+        let attributes = (("data-uuid", toString randId) : baseAttributes) ++
+                         zipWith (\i a -> ("data-optionalarg" ++ show i, T.unpack a)) [1,2..] optionalParameters ++
+                         zipWith (\i a -> ("data-arg" ++ show i, T.unpack a)) [1,2..] requiredParameters
         let classes = baseClasses
         case inlineType of
           EnvSpanNoContent -> return $ Span ("", classes, attributes) []
@@ -297,7 +299,9 @@ environmentFilter meta b@(RawBlock (Format "latex") s) =
         content = T.unpack . render $ latexContent
       in do
         randId <- nextRandom
-        let attributes = ("data-uuid", toString randId) : baseAttributes
+        let attributes = (("data-uuid", toString randId) : baseAttributes) ++
+                         zipWith (\i a -> ("data-optionalarg" ++ show i, T.unpack a)) [1,2..] optionalParameters ++
+                         zipWith (\i a -> ("data-arg" ++ show i, T.unpack a)) [1,2..] requiredParameters
         let classes = baseClasses
         case envType of
           EnvDivNoContent -> return $ Div ("", classes, attributes) []
