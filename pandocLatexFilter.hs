@@ -51,8 +51,8 @@ environmentMappings = Map.fromList [
     ("abstract", (Abstract, [], [])),
     ("multiple-choice", (MultipleChoice, ["multiple-choice"], [("ximera-multiple-choice", "")])),
     ("tikzpicture", (TikzPicture, [], [])),
-    ("python", (PythonDiv, ["python"], [("ximera-python", "")]))
-    ]
+    ("python", (PythonDiv, ["python"], [("ximera-python", "")])),
+    ("matrixanswer", (JavascriptDiv, ["matrixanswer"], [("ximera-matrixanswer", "")]))]
 
 actionMappings :: Map.Map T.Text (ActionType, [String], [(String,String)])
 actionMappings = Map.fromList [
@@ -61,8 +61,7 @@ actionMappings = Map.fromList [
     ("activitytitle", (ActivityTitle, [], [])),
     ("shortdescription", (ShortDescription, [], [])),
     ("includegraphics", (IncludeGraphics, [], [])),
-    ("youtube", (EnvSpan, ["youtube"], [("ximera-youtube", "")])),
-    ("matrixanswer", (JavascriptDiv, ["matrixanswer"], [("ximera-matrixanswer", "")]))]
+    ("youtube", (EnvSpan, ["youtube"], [("ximera-youtube", "")]))]
 
 environments :: [T.Text]
 environments = Map.keys environmentMappings
