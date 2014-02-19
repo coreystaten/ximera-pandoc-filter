@@ -302,10 +302,10 @@ environmentFilter meta b@(RawBlock (Format "latex") s) =
         case envType of
           EnvDivNoContent -> return $ Div ("", classes, attributes) []
           JavascriptDiv -> do
-            let cdata = "<script type=\"text/javascript\"><![CDATA[" ++ content ++ "]]></script>"
+            let cdata = "<script type=\"text/javascript\">" ++ content ++ "</script>"
             return $ Div ("", classes, attributes) [RawBlock (Format "html") cdata]
           PythonDiv -> do
-            let cdata = "<script type=\"text/python\"><![CDATA[" ++ content ++ "]]></script>"
+            let cdata = "<script type=\"text/python\">" ++ content ++ "</script>"
             return $ Div ("", classes, attributes) [RawBlock (Format "html") cdata]
           EnvDiv -> do
             blocks <- parseRawBlock content meta
