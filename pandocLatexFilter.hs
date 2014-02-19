@@ -30,7 +30,8 @@ import Text.LaTeX.Base.Syntax
 
 data EnvironmentType = EnvDiv
                      | EnvDivNoContent
-                     | CodeDiv
+                     | JavascriptDiv
+                     | PythonDiv
                      | MultipleChoice
                      | Abstract
                      | TikzPicture
@@ -50,8 +51,7 @@ environmentMappings = Map.fromList [
     ("abstract", (Abstract, [], [])),
     ("multiple-choice", (MultipleChoice, ["multiple-choice"], [("ximera-multiple-choice", "")])),
     ("tikzpicture", (TikzPicture, [], [])),
-    ("python-scaffold", (CodeDiv, ["python-scaffold"], [("ximera-python-scaffold", "")])),
-    ("python-validator", (CodeDiv, ["python-validator"], [("ximera-python-validator", "")]))
+    ("python", (PythonDiv, ["python"], [("ximera-python", "")]))
     ]
 
 actionMappings :: Map.Map T.Text (ActionType, [String], [(String,String)])
@@ -301,8 +301,11 @@ environmentFilter meta b@(RawBlock (Format "latex") s) =
         let classes = baseClasses
         case envType of
           EnvDivNoContent -> return $ Div ("", classes, attributes) []
-          CodeDiv -> do
-            let cdata = "<![CDATA[" ++ content ++ "]]>"
+          JavascriptDiv -> do
+            let cdata = "<script type=\"text/javascript\"><![CDATA[" ++ content ++ "]]></script>"
+            return $ Div ("", classes, attributes) [RawBlock (Format "html") cdata]
+          PythonDiv -> do
+            let cdata = "<script type=\"text/python\"><![CDATA[" ++ content ++ "]]></script>"
             return $ Div ("", classes, attributes) [RawBlock (Format "html") cdata]
           EnvDiv -> do
             blocks <- parseRawBlock content meta
