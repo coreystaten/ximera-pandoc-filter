@@ -62,7 +62,7 @@ actionMappings = Map.fromList [
     ("shortdescription", (ShortDescription, [], [])),
     ("includegraphics", (IncludeGraphics, [], [])),
     ("youtube", (EnvSpan, ["youtube"], [("ximera-youtube", "")])),
-    ("vecanswer", (CodeSpan, ["vecanswer"], [("ximera-vecanswer", "")]))]
+    ("matrixanswer", (JavascriptDiv, ["matrixanswer"], [("ximera-matrixanswer", "")]))]
 
 environments :: [T.Text]
 environments = Map.keys environmentMappings
