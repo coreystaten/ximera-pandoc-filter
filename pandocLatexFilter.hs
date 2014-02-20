@@ -52,6 +52,7 @@ environmentMappings = Map.fromList [
     ("multiple-choice", (MultipleChoice, ["multiple-choice"], [("ximera-multiple-choice", "")])),
     ("tikzpicture", (TikzPicture, [], [])),
     ("python", (PythonDiv, ["python"], [("ximera-python", "")])),
+    ("free-response", (EnvDiv, ["free-response"], [("ximera-free-response", "")])),
     ("matrix-answer", (JavascriptDiv, ["matrix-answer"], [("ximera-matrix-answer", "")])),
     ("expression-answer", (JavascriptDiv, ["expression-answer"], [("ximera-expression-answer", "")]))]
 
