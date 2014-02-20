@@ -52,7 +52,7 @@ environmentMappings = Map.fromList [
     ("multiple-choice", (MultipleChoice, ["multiple-choice"], [("ximera-multiple-choice", "")])),
     ("tikzpicture", (TikzPicture, [], [])),
     ("python", (PythonDiv, ["python"], [("ximera-python", "")])),
-    ("matrixanswer", (JavascriptDiv, ["matrixanswer"], [("ximera-matrixanswer", "")]))]
+    ("matrix-answer", (JavascriptDiv, ["matrix-answer"], [("ximera-matrix-answer", "")]))]
 
 actionMappings :: Map.Map T.Text (ActionType, [String], [(String,String)])
 actionMappings = Map.fromList [
