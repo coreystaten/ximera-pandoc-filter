@@ -240,6 +240,23 @@ mapInlineFilter f meta (Para inlines) = do
   return $ Para mappedInlines
 mapInlineFilter _ _ b = return b
 
+splitKeyValueArgument :: T.Text -> Map.Map T.Text T.Text
+splitKeyValueArgument arg =
+  let equations = T.split (== ',') arg
+      eqSplits = map (T.split (== '=')) equations
+  in
+   listsToMap eqSplits
+  where
+    listsToMap :: [[T.Text]] -> Map.Map T.Text T.Text
+    listsToMap lst = listsToMap' lst Map.empty
+    listsToMap' :: [[T.Text]] -> Map.Map T.Text T.Text -> Map.Map T.Text T.Text
+    listsToMap' ((x:y:_):lst) m = Map.insert x y (listsToMap' lst m)
+    listsToMap' (_:lst) m = listsToMap' lst m
+    listsToMap' _ m = m
+
+keyValueToDataParameters :: Map.Map T.Text T.Text -> [(String, String)]
+keyValueToDataParameters m = map (\(x,y) -> ("data-" ++ T.unpack x, T.unpack y)) (Map.assocs m)
+
 actionFilter  = mapInlineFilter actionFilter'
 
 actionFilter' :: Map.Map String MetaValue -> Inline -> IO Inline
@@ -258,9 +275,13 @@ actionFilter' meta i@(RawInline (Format "latex") s) =
           [] -> ""
       in do
         randId <- nextRandom
+        -- Add data attributes for arguments, as well as for the split attributes of the first optional argument.
         let attributes = (("data-uuid", toString randId) : baseAttributes) ++
                          zipWith (\i a -> ("data-optionalarg" ++ show i, T.unpack a)) [1,2..] optionalParameters ++
-                         zipWith (\i a -> ("data-arg" ++ show i, T.unpack a)) [1,2..] requiredParameters
+                         zipWith (\i a -> ("data-arg" ++ show i, T.unpack a)) [1,2..] requiredParameters ++
+                         case length optionalParameters of
+                           0 -> []
+                           _ -> keyValueToDataParameters $ splitKeyValueArgument $ head optionalParameters
         let classes = baseClasses
         case inlineType of
           EnvSpanNoContent -> return $ Span ("", classes, attributes) []
@@ -300,7 +321,10 @@ environmentFilter meta b@(RawBlock (Format "latex") s) =
         randId <- nextRandom
         let attributes = (("data-uuid", toString randId) : baseAttributes) ++
                          zipWith (\i a -> ("data-optionalarg" ++ show i, T.unpack a)) [1,2..] optionalParameters ++
-                         zipWith (\i a -> ("data-arg" ++ show i, T.unpack a)) [1,2..] requiredParameters
+                         zipWith (\i a -> ("data-arg" ++ show i, T.unpack a)) [1,2..] requiredParameters ++
+                         case length optionalParameters of
+                           0 -> []
+                           _ -> keyValueToDataParameters $ splitKeyValueArgument $ head optionalParameters
         let classes = baseClasses
         case envType of
           EnvDivNoContent -> return $ Div ("", classes, attributes) []
