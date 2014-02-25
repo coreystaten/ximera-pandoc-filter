@@ -30,6 +30,7 @@ import Text.LaTeX.Base.Syntax
 
 data EnvironmentType = EnvDiv
                      | EnvDivNoContent
+                     | JavascriptPlainSpan
                      | JavascriptDiv
                      | PythonDiv
                      | MultipleChoice
@@ -54,7 +55,7 @@ environmentMappings = Map.fromList [
     ("python", (PythonDiv, ["python"], [("ximera-python", "")])),
     ("free-response", (EnvDiv, ["free-response"], [("ximera-free-response", "")])),
     ("matrix-answer", (JavascriptDiv, ["matrix-answer"], [("ximera-matrix-answer", "")])),
-    ("expression-answer", (JavascriptDiv, ["expression-answer"], [("ximera-expression-answer", "")]))]
+    ("expression-answer", (JavascriptPlainSpan, ["expression-answer"], [("ximera-expression-answer", "")]))]
 
 actionMappings :: Map.Map T.Text (ActionType, [String], [(String,String)])
 actionMappings = Map.fromList [
@@ -67,10 +68,6 @@ actionMappings = Map.fromList [
 
 environments :: [T.Text]
 environments = Map.keys environmentMappings
-
-actions :: [T.Text]
-actions = Map.keys actionMappings
-
 
 -- | The template to use for tikzpictures from the filter, loaded from tikz-template.tex
 tikzTemplate :: IO Template
@@ -330,6 +327,9 @@ environmentFilter meta b@(RawBlock (Format "latex") s) =
         let classes = baseClasses
         case envType of
           EnvDivNoContent -> return $ Div ("", classes, attributes) []
+          JavascriptPlainSpan -> do
+            let cdata = "<script type=\"text/javascript\">" ++ content ++ "</script>"
+            return $ Plain [Span ("", classes, attributes) [RawInline (Format "html") cdata]]
           JavascriptDiv -> do
             let cdata = "<script type=\"text/javascript\">" ++ content ++ "</script>"
             return $ Div ("", classes, attributes) [RawBlock (Format "html") cdata]
@@ -412,16 +412,8 @@ toJSONFilterMeta f =
         BL.putStr . encode $ Pandoc (Meta meta) finalBlocks
 
 mergeAdjacent :: [Block] -> [Block]
-mergeAdjacent (a@(Para i) : b@(Plain [s@(Span (_, classes, _) _)]) : xs) =
-    if not (null (map T.pack classes `intersect` actions)) then
-      Para (i ++ [s]):xs
-    else
-      a:mergeAdjacent (b:xs)
-mergeAdjacent (a@(Plain [s@(Span (_, classes, _) _)]):b@(Para i):xs) =
-    if not (null (map T.pack classes `intersect` actions)) then
-      Para (s:i):xs
-    else
-      a:mergeAdjacent (b:xs)
+mergeAdjacent (a@(Para i) : b@(Plain [s@(Span (_, classes, _) _)]) : xs) = Para (i ++ [s]):xs
+mergeAdjacent (a@(Plain [s@(Span (_, classes, _) _)]):b@(Para i):xs) = Para (s:i):xs
 mergeAdjacent (a:xs) = mergeInElement a : mergeAdjacent xs
 mergeAdjacent [] = []
 
