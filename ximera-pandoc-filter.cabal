@@ -69,7 +69,7 @@ executable ximera-pandoc-filter
                        uuid >= 1.3.3,
                        regex-pcre-builtin >= 0.94.2,
                        HaTeX >= 3.10.0.0,
-                       mongoDB == 1.4.1.1
+                       mongoDB == 1.4.4
 
   
   -- Directories containing source files.
