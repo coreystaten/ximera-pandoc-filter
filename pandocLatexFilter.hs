@@ -77,7 +77,7 @@ environments = Map.keys environmentMappings
 tikzTemplate :: IO Template
 tikzTemplate =
     do
-        filterPath <- getEnv "XIMERA_FILTER_PATH"
+        filterPath <- getEnv "XIMERA_TIKZ_TEMPLATE_PATH"
         let templatePath = dropFileName filterPath </> "tikz-template.tex"
         templateContents <- readFile templatePath
         let result =  case compileTemplate $ T.pack templateContents of
