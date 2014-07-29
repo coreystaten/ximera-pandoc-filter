@@ -51,11 +51,15 @@ environmentMappings :: Map.Map T.Text (EnvironmentType, [String], [(String,Strin
 environmentMappings = Map.fromList [
     ("abstract", (Abstract, [], [])),
     ("multiple-choice", (MultipleChoice, ["multiple-choice"], [("ximera-multiple-choice", "")])),
+    ("multipleChoice", (MultipleChoice, ["multiple-choice"], [("ximera-multiple-choice", "")])),
     ("tikzpicture", (TikzPicture, [], [])),
     ("python", (PythonDiv, ["python"], [("ximera-python", "")])),
     ("free-response", (EnvDiv, ["free-response"], [("ximera-free-response", "")])),
+    ("freeResponse", (EnvDiv, ["free-response"], [("ximera-free-response", "")])),
     ("matrix-answer", (JavascriptDiv, ["matrix-answer"], [("ximera-matrix-answer", "")])),
-    ("expression-answer", (JavascriptPlainSpan, ["expression-answer"], [("ximera-expression-answer", "")]))]
+    ("matrixAnswer", (JavascriptDiv, ["matrix-answer"], [("ximera-matrix-answer", "")])),
+    ("expression-answer", (JavascriptPlainSpan, ["expression-answer"], [("ximera-expression-answer", "")])),
+    ("expressionAnswer", (JavascriptPlainSpan, ["expression-answer"], [("ximera-expression-answer", "")]))]
 
 actionMappings :: Map.Map T.Text (ActionType, [String], [(String,String)])
 actionMappings = Map.fromList [
@@ -73,7 +77,7 @@ environments = Map.keys environmentMappings
 tikzTemplate :: IO Template
 tikzTemplate =
     do
-        filterPath <- getEnv "XIMERA_FILTER_PATH"
+        filterPath <- getEnv "XIMERA_TIKZ_TEMPLATE_PATH"
         let templatePath = dropFileName filterPath </> "tikz-template.tex"
         templateContents <- readFile templatePath
         let result =  case compileTemplate $ T.pack templateContents of
@@ -264,6 +268,7 @@ actionFilter' meta i@(RawInline (Format "latex") s) =
     Left errorString -> return i
     Right (TeXComm name args) -> inlineCommand (T.pack name) (parseTeXArgs args)
     Right (TeXCommS name) -> inlineCommand (T.pack name) ([], [])
+    Right _ -> return i
   where
     inlineCommand :: T.Text -> ([T.Text], [T.Text]) -> IO Inline
     inlineCommand name (optionalParameters, requiredParameters) =
